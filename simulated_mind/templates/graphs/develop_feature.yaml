@@ -1,0 +1,19 @@
+graph_id: develop_feature_v1_contextual_output
+description: Template for developing a new software feature, outputting sub-goals to context.
+
+entry_node: store_sub_goals # Changed entry to directly store the predefined list
+
+nodes:
+  store_sub_goals:
+    primitive: STORE
+    args:
+      memory_key: "sub_goals_list" # Key expected by the Planner
+      value_source: "literal"
+      value_params: # This is the literal list of sub-goal strings
+        - "Clarify feature requirements and acceptance criteria."
+        - "Design the feature, including UI/UX if applicable."
+        - "Implement the core logic for the feature."
+        - "Write unit and integration tests for the feature."
+        - "Document the new feature."
+    # next_node: null (or omitted, indicating end of graph as this is the only node)
+
