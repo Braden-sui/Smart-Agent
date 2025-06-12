@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from ..logging.journal import Journal
+from ..journal.journal import Journal
 
 
 class Action:

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, List
 
-from ..logging.journal import Journal
+from ..journal.journal import Journal
 
 
 @dataclass(frozen=True)

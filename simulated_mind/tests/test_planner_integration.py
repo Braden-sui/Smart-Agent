@@ -17,7 +17,7 @@ from unittest.mock import Mock
 from simulated_mind.core.meta_agent import MetaAgent
 from simulated_mind.memory.dao import MemoryDAO
 from simulated_mind.safety.guard import SafetyGuard
-from simulated_mind.logging.journal import Journal
+from simulated_mind.journal.journal import Journal
 
 
 class TestPlannerIntegration(unittest.TestCase):

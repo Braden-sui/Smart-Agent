@@ -9,7 +9,7 @@ from .sub_agent import SubAgent
 from ..memory.dao import MemoryDAO  # local relative import
 from ..safety.guard import SafetyGuard
 from ..learning.loop import LearningLoop
-from ..logging.journal import Journal
+from simulated_mind.journal.journal import Journal
 
 
 class MetaAgent(BaseAgent):

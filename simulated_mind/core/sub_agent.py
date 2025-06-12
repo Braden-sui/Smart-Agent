@@ -6,7 +6,7 @@ from typing import Any, Type
 from .base_agent import Action, BaseAgent
 from .planner import Planner, Goal  # Import Planner and Goal
 from ..memory.dao import MemoryDAO
-from ..logging.journal import Journal
+from simulated_mind.journal.journal import Journal
 
 
 class SubAgent(BaseAgent):
@@ -40,6 +40,17 @@ class SubAgent(BaseAgent):
                 content=subtasks,
                 tags=["task"],
             )
+            # Upward reporting: report planned subtasks to CEO/global workspace
+            if hasattr(self, 'ceo_user_id') and self.ceo_user_id:
+                self.memory.report_to_ceo(
+                    ceo_user_id=self.ceo_user_id,
+                    subagent_id=self.id,
+                    knowledge={"subtasks": subtasks, "goal_desc": goal_desc},
+                    task_id=goal_desc,
+                    report_type="planning",
+                    tags=["auto_report"],
+                    metadata={"source": "SubAgent.decide"}
+                )
             self.journal.log_event("sub_agent.plan", {"agent_id": self.id, "subtasks": subtasks})
             return Action(kind="planned", payload=subtasks)
         return Action(kind="noop")

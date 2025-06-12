@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any
 
 from ..memory.dao import MemoryDAO
-from ..logging.journal import Journal
+from ..journal.journal import Journal
 
 
 class LearningLoop:  # pragma: no cover – placeholder

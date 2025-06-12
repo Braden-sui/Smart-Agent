@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Protocol
 
 from ..safety.guard import SafetyGuard
-from ..logging.journal import Journal
+from ..journal.journal import Journal
 
 
 @dataclass

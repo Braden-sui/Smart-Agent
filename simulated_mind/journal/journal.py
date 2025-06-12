@@ -1,4 +1,4 @@
-"""Simple transparency‐oriented logging helper.
+"""Simple transparency‐oriented journal helper.
 
 Agents and subsystems call ``Journal.log_event(label, payload)`` to emit
 structured events. A default sink prints to stdout; a null journal suppresses

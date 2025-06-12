@@ -6,7 +6,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from ..logging.journal import Journal
+from ..journal.journal import Journal
 
 
 class SafetyGuard:

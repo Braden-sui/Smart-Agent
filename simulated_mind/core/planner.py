@@ -17,7 +17,7 @@ from .logic_primitives import PRIMITIVE_REGISTRY
 
 
 try:
-    from ..logging.journal import Journal
+    from ..journal.journal import Journal
 except ImportError:
     if __name__ == '__main__':
         # Define a placeholder Journal class for self-testing when run directly
@@ -58,9 +58,9 @@ except ImportError as e_relative:
             # print(f"DEBUG_SELF_TEST: Added to sys.path for TEMPLATES import: {project_root}", file=sys.stderr); sys.stderr.flush()
             # print(f"DEBUG_SELF_TEST: Current sys.path: {sys.path}", file=sys.stderr); sys.stderr.flush()
 
-            from simulated_mind.templates.planner_rules import TEMPLATES
+            from simulated_mind.journal.templates.planner_rules import TEMPLATES
             # print(f"DEBUG_SELF_TEST: Successfully imported TEMPLATES via absolute path. Keys: {list(TEMPLATES.keys()) if TEMPLATES is not None else 'None'}", file=sys.stderr); sys.stderr.flush()
-            from simulated_mind.templates.planner_rules import GRAPH_TEMPLATES # Also import GRAPH_TEMPLATES here
+            from simulated_mind.journal.templates.planner_rules import GRAPH_TEMPLATES # Also import GRAPH_TEMPLATES here
             print(f"DEBUG_PLANNER_IMPORT: Fallback import successful. GRAPH_TEMPLATES keys: {list(GRAPH_TEMPLATES.keys()) if GRAPH_TEMPLATES else 'EMPTY'}", file=sys.stderr); sys.stderr.flush()
 
         except ImportError as e_absolute:
@@ -94,24 +94,25 @@ class Goal:
 MAX_RECURSION_DEPTH = 3 # Configurable maximum recursion depth
 
 class Planner:
-    """Recursive, template-aware planner, integrating LogicEngine for graph-based planning."""
+    """Recursive, template-aware planner, integrating LogicEngine for graph-based planning and persistent goal storage via TaskManager."""
 
-    def __init__(self, memory_store: Any | None = None, journal: Journal | None = None, goal_class: Optional[Type[Goal]] = None, primitive_registry: Optional[Dict[str, Callable]] = None):
+    def __init__(self, memory_store: Any | None = None, journal: Journal | None = None, goal_class: Optional[Type[Goal]] = None, primitive_registry: Optional[Dict[str, Callable]] = None, task_manager: Any = None, local_llm_client: Any = None):
         self.primitive_registry = primitive_registry or PRIMITIVE_REGISTRY
         try:
-            # print(file=sys.stderr,f"DEBUG: Planner __init__ - TEMPLATES available: {bool(TEMPLATES)} Keys: {list(TEMPLATES.keys()) if TEMPLATES else 'None'}") # Commented out to reduce variables
             self.memory_store = memory_store
             self.journal = journal or Journal.null()
             self.goal_class = goal_class # Assign goal_class
             self._goal_id_counter = 0 # For generating unique goal IDs if not provided
             self.plan_cache: Dict[str, List[Goal]] = {} # Initialize plan_cache
-            # self.load_templates() was removed as TEMPLATES and GRAPH_TEMPLATES are now module-level
+            self.task_manager = task_manager
+            self.local_llm_client = local_llm_client
         except Exception as e_planner_init:
             print(f"ERROR in Planner.__init__: {e_planner_init}\n", file=sys.stderr)
             import traceback
             traceback.print_exc(file=sys.stderr)
             sys.stderr.flush()
             raise # Re-raise after printing to ensure test failure
+
 
     def _generate_goal_id(self, prefix: str = "goal") -> str:
         self._goal_id_counter += 1
@@ -309,7 +310,53 @@ class Planner:
             # import traceback; traceback.print_exc(file=sys.stderr) # Debug
             return None
 
-    def create_plan(self, goal_description: str) -> List[Union[Goal, str]]: # Updated type hint
+    def create_plan(self, goal_description: str) -> List[Goal]:
+        """Creates a plan (list of Goal objects) for a given goal description.
+        Attempts to use graph-based planning first, then falls back to template/memory-based decomposition.
+        Persists all subgoals via TaskManager if available.
+        """
+        self.journal.log_event("planner.create_plan.start", {"goal": goal_description})
+        # 1. Attempt graph-based planning
+        graph_sub_tasks = self._create_plan_from_graph(goal_description)
+        goals: List[Goal] = []
+        if graph_sub_tasks is not None:
+            self.journal.log_event("planner.create_plan.source", {"goal": goal_description, "source": "graph_engine", "sub_tasks_count": len(graph_sub_tasks)})
+            for sub in graph_sub_tasks:
+                if isinstance(sub, Goal):
+                    goals.append(self._persist_goal(sub))
+                else:
+                    goals.append(self._persist_goal(self._make_goal(sub, created_by="planner_graph")))
+            return goals
+        # 2. Fallback to existing decomposition logic (templates, memory, generic)
+        self.journal.log_event("planner.create_plan.fallback_to_decompose", {"goal": goal_description})
+        fallback_sub_tasks = self.decompose_goal(goal_description)
+        self.journal.log_event("planner.create_plan.source", {"goal": goal_description, "source": "decompose_goal_fallback", "sub_tasks_count": len(fallback_sub_tasks)})
+        for sub in fallback_sub_tasks:
+            if isinstance(sub, Goal):
+                goals.append(self._persist_goal(sub))
+            else:
+                goals.append(self._persist_goal(self._make_goal(sub, created_by="planner_fallback")))
+        return goals
+
+    def _persist_goal(self, goal: Goal) -> Goal:
+        if self.task_manager:
+            return self.task_manager.create_goal(
+                description=goal.description,
+                priority=goal.priority,
+                parent_goal=goal.parent_goal,
+                created_by=goal.created_by
+            )
+        return goal
+
+    def _make_goal(self, description: str, created_by: str = None, priority: int = 5, parent_goal: Goal = None) -> Goal:
+        return self.goal_class(
+            id=self._generate_goal_id(),
+            description=description,
+            priority=priority,
+            parent_goal=parent_goal,
+            created_by=created_by
+        )
+
         """Creates a plan (list of sub-task descriptions) for a given goal description.
         
         Attempts to use graph-based planning first, then falls back to template/memory-based decomposition.
@@ -328,7 +375,71 @@ class Planner:
         self.journal.log_event("planner.create_plan.source", {"goal": goal_description, "source": "decompose_goal_fallback", "sub_tasks_count": len(fallback_sub_tasks)})
         return fallback_sub_tasks
 
-    def decompose_goal(self, goal_description: str, goal_id_prefix: str = "subgoal") -> List[Union[Goal, str]]: # Updated type hint
+    def decompose_goal(self, goal_description: str, goal_id_prefix: str = "subgoal") -> List[Goal]:
+        """Decomposes a goal description into sub-task Goal objects using templates, memory, or local LLM. Persists via TaskManager if available."""
+        subtasks: List[str] = []
+        decomposition_source = "fallback"
+        normalized_goal_desc = goal_description.strip().lower()
+        for template_key, template_subtasks in TEMPLATES.items():
+            if normalized_goal_desc.startswith(template_key):
+                subtasks = list(template_subtasks)
+                decomposition_source = f"template:{template_key}"
+                self.journal.log_event(
+                    "planner.decompose_goal.template_match",
+                    {"goal": goal_description, "template_key": template_key, "subtasks_count": len(subtasks)}
+                )
+                break
+        # If no template match and local LLM is available, use it
+        if not subtasks and self.local_llm_client and self.local_llm_client.is_available():
+            try:
+                subtasks = self._local_llm_decompose_goal(goal_description)
+                decomposition_source = "local_llm"
+                self.journal.log_event(
+                    "planner.decompose_goal.local_llm",
+                    {"goal": goal_description, "subtasks_count": len(subtasks)}
+                )
+            except Exception as e:
+                self.journal.log_event(
+                    "planner.decompose_goal.local_llm_error",
+                    {"goal": goal_description, "error": str(e)}
+                )
+                subtasks = []
+        # Fallback: create a generic subtask if nothing found
+        if not subtasks:
+            subtasks = [f"Review and handle: {goal_description}"]
+            self.journal.log_event(
+                "planner.decompose_goal.fallback",
+                {"goal": goal_description, "reason": "no template, memory, or local LLM match"}
+            )
+        # Always return a list of Goal objects, persisted if possible
+        goals: List[Goal] = []
+        for sub in subtasks:
+            goals.append(self._persist_goal(self._make_goal(sub, created_by=decomposition_source)))
+        return goals
+
+    def _local_llm_decompose_goal(self, goal_description: str) -> list:
+        """Use local LLM to decompose goal into actionable subtasks."""
+        if not self.local_llm_client or not self.local_llm_client.is_available():
+            raise RuntimeError("Local LLM client not available")
+        prompt = f"""Task: Break down this goal into 3-5 actionable steps.\n\nGoal: {goal_description}\n\nProvide ONLY a JSON list of specific tasks:\n[\"step 1\", \"step 2\", \"step 3\"]\n\nJSON:"""
+        try:
+            response = self.local_llm_client.complete_text(prompt, max_tokens=256)
+            import json, re
+            json_match = re.search(r'\[.*?\]', response, re.DOTALL)
+            if json_match:
+                json_str = json_match.group()
+                subtasks = json.loads(json_str)
+                if isinstance(subtasks, list) and all(isinstance(task, str) for task in subtasks):
+                    return [task.strip() for task in subtasks if task.strip()]
+            # Fallback: parse line by line if JSON parsing fails
+            lines = [line.strip(' -\"[]') for line in response.split('\n') if line.strip()]
+            if len(lines) >= 2:
+                return lines[:5]
+            raise ValueError("Could not parse valid subtasks from LLM response")
+        except Exception as e:
+            self.journal.log_event("planner.local_llm_decomposition.error", {"goal": goal_description, "error": str(e)})
+            raise
+
         """Decomposes a goal description into sub-task descriptions using templates or memory.
 
         Args:

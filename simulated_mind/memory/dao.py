@@ -2,14 +2,63 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 from .mem0_client import Mem0Client
-from ..logging.journal import Journal
+from ..journal.journal import Journal
 
 
 class MemoryDAO:
     """Data Access Object for memory operations, utilizing Mem0Client."""
+
+    def report_to_ceo(
+        self,
+        ceo_user_id: str,
+        subagent_id: str,
+        knowledge: dict,
+        task_id: str = None,
+        report_type: str = "research",
+        tags: Optional[list[str]] = None,
+        metadata: Optional[dict] = None,
+    ) -> None:
+        """Report knowledge from a subagent to the CEO/global workspace via mem0.
+        - ceo_user_id: The CEO/global workspace user_id.
+        - subagent_id: The reporting subagent's ID.
+        - knowledge: The knowledge/result to report (dict).
+        - task_id: (optional) The task/goal ID.
+        - report_type: e.g. 'research', 'improvement', 'result'.
+        - tags: Additional tags for filtering/audit.
+        - metadata: Additional metadata.
+        """
+        from datetime import datetime
+        report_tags = ["subagent_report", f"subagent:{subagent_id}", f"type:{report_type}"]
+        if tags:
+            report_tags.extend(tags)
+        report_metadata = dict(metadata or {})
+        report_metadata.update({
+            "subagent_id": subagent_id,
+            "task_id": task_id,
+            "report_type": report_type,
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        })
+        memory_id = f"report_{subagent_id}_{task_id or 'unknown'}_{report_metadata['timestamp']}"
+        try:
+            self.store_memory(
+                user_id=ceo_user_id,
+                memory_id=memory_id,
+                content=knowledge,
+                tags=report_tags,
+                metadata=report_metadata
+            )
+            self._journal.log_event(
+                "MemoryDAO.report_to_ceo: Reported knowledge to CEO.",
+                payload={"ceo_user_id": ceo_user_id, "subagent_id": subagent_id, "task_id": task_id, "tags": report_tags}
+            )
+        except Exception as e:
+            self._journal.log_event(
+                "MemoryDAO.report_to_ceo: Error reporting to CEO.",
+                payload={"ceo_user_id": ceo_user_id, "subagent_id": subagent_id, "task_id": task_id, "error": str(e)}
+            )
 
     def __init__(
         self,

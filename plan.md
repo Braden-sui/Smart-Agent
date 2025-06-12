@@ -20,6 +20,52 @@
   3. Integrate memory-based prioritization (score subtasks by relevance/recall).
   4. Integrate with a concrete `TaskManager` and `Goal` dataclass.
 
+### Planner Improvement To-Do List (Detailed)
+
+> This subsection merges the standalone `plannerimprovementtodolist.md` into the main roadmap. It offers granular guidance for evolving the planner while keeping code lean and transparent.
+
+#### Core Principles
+
+- **Less code, more data** – behaviour lives in editable graphs/templates rather than nested Python.
+- **Declarative reasoning** – small set of primitives (`SEQ`, `PAR`, `COND`, `CALL`, `EVAL`, `STORE`).
+- **Memory-first** – fetch & learn rules from mem0, minimise hard-coded logic.
+- **Self-introspective** – runtime trace, hot-reload, guarded self-modification.
+- **Auditability & safety** – every step logged; SafetyGuard gate for risky patches.
+
+#### Milestone Checklist
+
+| Milestone | Status | Key Deliverables |
+|-----------|--------|------------------|
+| **M1 – Primitive Extraction** | ✅ | Minimal primitives (≤15 LOC each) & registry |
+| **M2 – Graph-Based Planner** | ✅ | YAML/JSON graphs, loader, executor replaces recursion |
+| **M3 – Memory-Augmented Rules** | 🟡 | mem0 search for graphs; store usage metrics |
+| **M4 – Introspection & Hot-Reload** | ⬜ | `GET_LOGIC_GRAPH`, `PATCH_GRAPH`, live editing CLI |
+| **M5 – Trace & Explainability** | ⬜ | `logic.trace` events, `explain(goal_id)` reconstruction |
+| **M6 – Safety & Rollback** | ⬜ | Sandbox tests, versioned graphs, one-click rollback |
+| **M7 – Stress & Regression** | ⬜ | Goal corpus, fuzz tests, executor ≤400 LOC |
+
+#### Stretch / SOTA Enhancements
+
+| Idea | Benefit | Effort |
+|------|---------|--------|
+| **LLM-Assisted Graph Synthesis** | Draft new logic graphs from natural-language goals. | ★★★ |
+| **Dynamic Tool Selection** | Function-calling LLM activates external APIs/tools on the fly. | ★★ |
+| **MCTS / Planning-as-Search** | Better global optimisation for long-horizon goals. | ★★★★ |
+| **Reinforcement Learning of Primitive Weights** | Adaptive prioritisation of alternative sub-plans. | ★★★ |
+| **Neural-Symbolic Hybrid** | Small LM decides `COND` branches when rule unclear. | ★★ |
+| **Multi-Agent Plan Negotiation** | Share graphs between SubAgents and converge via voting. | ★★★ |
+
+#### Definition of Done
+
+- All **M1–M7** tasks completed.
+- Core executor ≤ **400 LOC**.
+- ≥ 95 % unit-test coverage for primitives & loader.
+- Average plan generation < **50 ms**.
+- New rule integration ≤ **5 min**, zero code changes.
+- Trace/explain outputs human-readable and passes audit review.
+
+> *Keep it simple, observable, and editable – today’s clarity enables tomorrow’s super-intelligence.*
+
 ## 3. LearningLoop Enhancement: Automated Self-Improvement
 
 - **Goal:** Enable the agent to mine its own logs and performance for self-improvement.
