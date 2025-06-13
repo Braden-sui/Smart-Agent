@@ -98,6 +98,25 @@ venv.bak/
 # Project specific
 .conda_env
 
+# Model files
+*.gguf
+*.bin
+*.pth
+*.safetensors
+*.h5
+*.pt
+*.pkl
+
+# Large data files
+*.zip
+*.tar.gz
+*.tar
+*.7z
+
+# Model directories
+**/models/
+!**/models/__init__.py
+
 # Temporary files with percentage signs and brackets
 *%
 *]

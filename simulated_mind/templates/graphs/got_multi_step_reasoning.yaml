@@ -1,0 +1,43 @@
+graph_id: got_multi_step_reasoning_v1
+description: Graph-of-Thoughts multi-step reasoning template using RWKV7 state processing
+entry_node: initialize_reasoning_state
+
+nodes:
+  initialize_reasoning_state:
+    primitive: RWKV7_STATE_INIT
+    args:
+      context_prompt: "Prepare for multi-step reasoning analysis. Consider the problem from multiple angles."
+    next_node: generate_diverse_thoughts
+
+  generate_diverse_thoughts:
+    primitive: RWKV7_THOUGHT_GENERATION
+    args:
+      thought_prompts:
+        - "Analyze this problem logically, step by step"
+        - "Consider creative and unconventional approaches"
+        - "What are the potential risks and constraints?"
+        - "How would an expert in this domain approach this?"
+      branching_factor: 4
+    next_node: score_thought_quality
+
+  score_thought_quality:
+    primitive: RWKV7_STATE_SCORING
+    args:
+      scoring_criteria: 
+        - "relevance"
+        - "feasibility" 
+        - "novelty"
+        - "completeness"
+    next_node: merge_best_thoughts
+
+  merge_best_thoughts:
+    primitive: RWKV7_STATE_MERGE
+    args:
+      combination_method: "weighted_synthesis"
+      feedback_loops: true
+    next_node: generate_final_response
+
+  generate_final_response:
+    primitive: RWKV7_STATE_RESPONSE
+    args:
+      output_format: "structured_reasoning"

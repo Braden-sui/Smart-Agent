@@ -1,0 +1,22 @@
+name: sim_mind_env
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - python-dotenv     # For loading .env files
+      - mem0ai            # Latest Mem0 SDK
+      - rwkv              # For RWKV model interaction
+      - pytest            # For running tests
+      - jinja2            # For llama_cpp and template support
+      - llama-cpp-python  # Required for local LLM support
+      - anyio             # Required for mem0ai async support
+      - httpx             # Required for HTTP client
+      # Add other direct dependencies of your project here:
+      # - openai
+      # - pydantic
+      # - sqlalchemy
+      # - fastapi
+      # - uvicorn
