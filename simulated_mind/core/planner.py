@@ -41,7 +41,7 @@ MAX_RECURSION_DEPTH = 3 # Configurable maximum recursion depth
 class Planner:
     """Recursive, template-aware planner, integrating LogicEngine for graph-based planning and persistent goal storage via TaskManager."""
 
-    def __init__(self, memory_store: Any | None = None, journal: Journal | None = None, goal_class: Optional[Type[Goal]] = None, primitive_registry: Optional[Dict[str, Callable]] = None, task_manager: Any = None, local_llm_client: Any = None):
+    def __init__(self, memory_store: Any | None = None, journal: Journal | None = None, goal_class: Optional[Type[Goal]] = None, primitive_registry: Optional[Dict[str, Callable]] = None, task_manager: Any = None, local_llm_client: Any = None, *, planner_mode: str = "auto"):
         self.primitive_registry = primitive_registry or PRIMITIVE_REGISTRY
         try:
             self.memory_store = memory_store
@@ -51,6 +51,8 @@ class Planner:
             self.plan_cache: Dict[str, List[Goal]] = {} # Initialize plan_cache
             self.task_manager = task_manager
             self.local_llm_client = local_llm_client
+            # Graph-of-Thoughts configuration: "auto", "enabled", "disabled"
+            self.planner_mode = planner_mode.lower()
         except Exception as e_planner_init:
             print(f"ERROR in Planner.__init__: {e_planner_init}\n", file=sys.stderr)
             import traceback
@@ -324,33 +326,19 @@ class Planner:
             return None
 
     def _is_got_suitable(self, goal_description: str) -> bool:
-        """Check if goal is suitable for Graph-of-Thoughts reasoning."""
+        """Check if goal is suitable for Graph-of-Thoughts reasoning, taking the planner_mode into account."""
+        # Explicit override
+        if self.planner_mode == "enabled":
+            return True
+        if self.planner_mode == "disabled":
+            return False
+
+        # Automatic heuristic
         got_indicators = [
-            "analyze", "compare", "evaluate", "design", "strategy", 
+            "analyze", "compare", "evaluate", "design", "strategy",
             "complex", "multi-step", "reasoning", "problem-solving"
         ]
         return any(indicator in goal_description.lower() for indicator in got_indicators)
-
-    def _parse_goals_from_got_response(self, response: str) -> List[str]:
-        """Parse sub-goals from Graph-of-Thoughts response."""
-        import re
-        patterns = [
-            r'^\d+\.\s*(.+)$',  # 1. Step one
-            r'^-\s*(.+)$',      # - Step
-            r'^Step\s*\d+:\s*(.+)$',  # Step 1: Action
-            r'^\*\s*(.+)$'      # * Bullet
-        ]
-        goals = []
-        for line in response.split('\n'):
-            line = line.strip()
-            if not line:
-                continue
-            for pattern in patterns:
-                match = re.match(pattern, line, re.IGNORECASE)
-                if match and len(match.group(1)) > 10:  # Minimum goal length
-                    goals.append(match.group(1).strip())
-                    break
-        return goals[:10]  # Limit to 10 sub-goals
 
     def create_plan(self, goal_description: str) -> List[Goal]:
         """Creates a plan (list of Goal objects) for a given goal description.
@@ -359,16 +347,21 @@ class Planner:
         Persists all subgoals via TaskManager if available.
         """
         self.journal.log_event("planner.create_plan.start", {"goal": goal_description})
-        # 1. Attempt Graph-of-Thoughts planning for suitable goals
-        if hasattr(self, 'local_llm_client') and self.local_llm_client:
-            got_sub_tasks = self._create_plan_from_got_graph(goal_description)
-            if got_sub_tasks is not None:
+        # 1. Attempt Graph-of-Thoughts planning if mode permits
+        use_got = (
+            self.planner_mode == "enabled" or
+            (self.planner_mode == "auto" and self._is_got_suitable(goal_description))
+        )
+
+        if use_got and getattr(self, 'local_llm_client', None):
+            got_goals = self._create_plan_from_got_graph(goal_description)
+            if got_goals is not None:
                 self.journal.log_event("planner.create_plan.source", {
                     "goal": goal_description, 
                     "source": "got_reasoning", 
-                    "sub_tasks_count": len(got_sub_tasks)
+                    "sub_tasks_count": len(got_goals)
                 })
-                return got_sub_tasks
+                return got_goals
         # 2. Attempt traditional graph-based planning
         graph_sub_tasks = self._create_plan_from_graph(goal_description)
         goals: List[Goal] = []

@@ -74,6 +74,11 @@ def make_planner():
         local_llm_client = None
     
     print(f"Planner will use LLM client: {type(local_llm_client).__name__}")
+    
+    # Graph of Thoughts mode control: "auto" (default), "enabled", "disabled"
+    planner_mode = os.getenv("PLANNER_MODE", "auto").lower()
+    print(f"Planner mode (GoT): {planner_mode}")
+
     print("--- Planner Initialized --- ")
     
     return Planner(
@@ -81,7 +86,8 @@ def make_planner():
         journal=journal, 
         goal_class=Goal, 
         task_manager=task_manager, 
-        local_llm_client=local_llm_client
+        local_llm_client=local_llm_client,
+        planner_mode=planner_mode
     )
 
 
