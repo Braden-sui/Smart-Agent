@@ -62,6 +62,7 @@ import threading
 from dataclasses import dataclass, field, replace
 from typing import Optional, List, Dict, Any, Tuple, Callable
 from datetime import datetime
+from simulated_mind.journal.journal import Journal
 
 
 
@@ -95,12 +96,13 @@ class StateSnapshot:
 
 class ThreadSafeStateManager:
     """
-    Manages state for an LLM client in a thread-safe manner using immutable snapshots.
+    Manages state for an LLM client in a thread-safe and observable manner.
     """
-    def __init__(self, max_history: int = 100):
+    def __init__(self, max_history: int = 100, journal: Optional[Journal] = None):
         self._lock = threading.RLock()
         self._current: StateSnapshot = StateSnapshot()
         self._max_history = max_history
+        self._journal = journal
 
     def get_current_snapshot(self) -> StateSnapshot:
         """Returns the current state snapshot. It is immutable and safe to share."""
@@ -113,18 +115,34 @@ class ThreadSafeStateManager:
         the current state and must return a new, updated StateSnapshot.
         """
         with self._lock:
-            new_state = updater(self._current)
-            if not isinstance(new_state, StateSnapshot):
-                raise TypeError("Updater function must return a StateSnapshot instance.")
+            try:
+                new_state = updater(self._current)
+                if not isinstance(new_state, StateSnapshot):
+                    error = TypeError("Updater function must return a StateSnapshot instance.")
+                    if self._journal:
+                        self._journal.log_event("state_manager:error", {"reason": "InvalidStateSnapshot", "details": str(error)})
+                    raise error
+            except Exception as e:
+                if self._journal:
+                    self._journal.log_event("state_manager:error", {"reason": "UpdaterFunctionFailed", "details": str(e)})
+                raise
 
             # Enforce memory bounds on conversation history
             if len(new_state.conversation_history) > self._max_history:
                 trimmed_history = new_state.conversation_history[-self._max_history:]
-                # Create a new snapshot with the trimmed history. This bumps the version again,
-                # which is acceptable as it represents another state change (trimming).
+                if self._journal:
+                    self._journal.log_event("state_trim", {
+                        "trimmed_from": len(new_state.conversation_history),
+                        "trimmed_to": len(trimmed_history)
+                    })
                 new_state = new_state.with_update(conversation_history=trimmed_history)
             
             self._current = new_state
+            if self._journal:
+                self._journal.log_event("state_update_success", {
+                    "new_version": self._current.version,
+                    "timestamp": self._current.timestamp.isoformat()
+                })
             return self._current
 
     def set_snapshot(self, new_snapshot: StateSnapshot):
@@ -133,20 +151,29 @@ class ThreadSafeStateManager:
         Useful for loading state from an external source.
         """
         if not isinstance(new_snapshot, StateSnapshot):
-            raise TypeError("Provided state must be a StateSnapshot instance.")
+            error = TypeError("Provided state must be a StateSnapshot instance.")
+            if self._journal:
+                self._journal.log_event("state_manager:error", {"reason": "InvalidSetSnapshot", "details": str(error)})
+            raise error
         with self._lock:
             self._current = new_snapshot
+            if self._journal:
+                self._journal.log_event("state_set_success", {
+                    "set_to_version": self._current.version,
+                    "timestamp": self._current.timestamp.isoformat()
+                })
 
 class RWKV7GGUFClient(LocalLLMClient):
     """RWKV-7 GGUF implementation for efficient local AI interaction with state support."""
     
-    def __init__(self, model_path: str, context_size: int = 8192, max_history: int = 100):
+    def __init__(self, model_path: str, context_size: int = 8192, max_history: int = 100, journal: Optional[Journal] = None):
         self.model_path = model_path
         self.context_size = context_size
         self.model: Optional[Llama] = None
+        self.journal = journal
         
-        # New thread-safe and memory-bounded state manager
-        self._state_manager = ThreadSafeStateManager(max_history=max_history)
+        # New thread-safe and memory-bounded state manager with journaling
+        self._state_manager = ThreadSafeStateManager(max_history=max_history, journal=self.journal)
     
     def load(self):
         """Explicitly load the GGUF model."""

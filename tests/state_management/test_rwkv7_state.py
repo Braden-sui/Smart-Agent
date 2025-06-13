@@ -1,6 +1,7 @@
 import pytest
 import threading
 from simulated_mind.core.local_llm_client import RWKV7GGUFClient, StateSnapshot
+from simulated_mind.journal.journal import Journal
 
 @pytest.fixture
 def client() -> RWKV7GGUFClient:
@@ -61,6 +62,46 @@ def test_state_concurrency_is_fixed(client: RWKV7GGUFClient):
         f"Race condition still present! "
         f"Final counter was {final_counter}, expected {expected_counter}."
     )
+
+def test_state_recovery_and_journaling():
+    """
+    Verifies that state changes are logged to the journal and that state can be
+    successfully restored from a snapshot.
+    """
+    # Use a custom sink to capture journal events for verification
+    captured_events = []
+    def test_sink(label, payload):
+        captured_events.append((label, payload))
+
+    journal = Journal(sink=test_sink)
+    client1 = RWKV7GGUFClient(model_path="dummy/path", journal=journal)
+
+    # 1. Perform a state update and verify it's logged
+    def updater(s: StateSnapshot) -> StateSnapshot:
+        return s.with_update(metadata={'test_key': 'test_value'})
+    client1.atomic_state_update(updater)
+
+    update_events = [e for e in captured_events if e[0] == 'state_update_success']
+    assert len(update_events) == 1
+    assert update_events[0][1]['new_version'] == 1
+
+    # 2. Get a snapshot of the state
+    snapshot = client1._state_manager.get_current_snapshot()
+    assert snapshot.metadata['test_key'] == 'test_value'
+
+    # 3. Create a new client and restore its state from the snapshot
+    client2 = RWKV7GGUFClient(model_path="dummy/path", journal=journal)
+    client2._state_manager.set_snapshot(snapshot)
+
+    # 4. Verify the state was restored correctly
+    restored_state = client2.get_state()
+    assert restored_state['metadata']['test_key'] == 'test_value'
+    assert restored_state['version'] == 1
+
+    set_events = [e for e in captured_events if e[0] == 'state_set_success']
+    assert len(set_events) == 1
+    assert set_events[0][1]['set_to_version'] == 1
+
 
 def test_state_memory_bounding():
     """
