@@ -4,8 +4,10 @@ from __future__ import annotations
 from typing import Any, Type
 
 from .base_agent import Action, BaseAgent
-from .planner import Planner, Goal  # Import Planner and Goal
-from ..memory.dao import MemoryDAO
+import json
+from .planner import Planner, Goal
+from ..memory.cognitive_dao import RWKV7CognitiveMemoryDAO
+from ..memory.types import MemoryType
 from simulated_mind.journal.journal import Journal
 
 
@@ -13,7 +15,7 @@ class SubAgent(BaseAgent):
     def __init__(
         self,
         agent_id: str,
-        memory: MemoryDAO,
+        memory: RWKV7CognitiveMemoryDAO,
         journal: Journal | None = None,
     ):
         super().__init__(name=f"SubAgent-{agent_id[:8]}", journal=journal)
@@ -28,17 +30,22 @@ class SubAgent(BaseAgent):
 
     def decide(self) -> Action:
         # Placeholder logic: generate a planning task if none exist.
-        retrieved_record = self.memory.retrieve_memory(user_id=self.id, memory_id="agent_tasks")
-        tasks = retrieved_record.get("content") if retrieved_record else []
+        retrieved_mems = self.memory.get_memories(
+            user_id=self.id, query="agent_tasks", limit=1, memory_type=MemoryType.META
+        )
+        tasks_json = retrieved_mems[0].get("content") if retrieved_mems else None
+        tasks = json.loads(tasks_json) if tasks_json else []
         if not tasks:
             # Use planner to create tasks from last event (if string)
             goal_desc = getattr(self, "_last_event", "generic goal")
             subtasks = self.planner.create_plan(goal_desc)
-            self.memory.store_memory(
+            # Convert Goal objects to a serializable format (e.g., dicts)
+            subtasks_serializable = [subtask.to_dict() for subtask in subtasks]
+            self.memory.add_memory(
                 user_id=self.id,
-                memory_id="agent_tasks",
-                content=subtasks,
-                tags=["task"],
+                memory_type=MemoryType.META,
+                content=json.dumps(subtasks_serializable),
+                metadata={"memory_id": "agent_tasks", "tags": ["task"]},
             )
             # Upward reporting: report planned subtasks to CEO/global workspace
             if hasattr(self, 'ceo_user_id') and self.ceo_user_id:

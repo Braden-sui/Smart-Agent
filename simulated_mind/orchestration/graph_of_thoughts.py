@@ -29,7 +29,9 @@ class RWKV7GraphOfThoughtsEngine(LogicEngine):
         super().__init__(primitive_registry or PRIMITIVE_REGISTRY)
         self.rwkv_client = rwkv_client
         self.journal = journal or Journal.null()
-        if not hasattr(rwkv_client, 'model') or not hasattr(rwkv_client.model, 'get_state'):
+        # Ensure the client exposes state management methods directly
+        if not (hasattr(rwkv_client, 'get_state') and callable(getattr(rwkv_client, 'get_state', None)) and
+                hasattr(rwkv_client, 'set_state') and callable(getattr(rwkv_client, 'set_state', None))):
             raise ValueError("RWKV client must support state operations (get_state/set_state)")
 
     def execute_graph_of_thoughts(self, graph: LogicGraph, initial_context: Optional[LogicContext] = None, base_prompt: str = "") -> LogicContext:

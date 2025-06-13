@@ -1,15 +1,13 @@
-"""Async reasoning pipeline implementation for Graph-of-Thoughts.
+"""Synchronous reasoning pipeline implementation for Graph-of-Thoughts.
 
 This module extends :class:`~simulated_mind.orchestration.graph_core.GraphOfThoughts`
 with fully-functional asynchronous decomposition → exploration → synthesis →
 validation phases, plus state-preservation utilities and error-recovery logic.
 
-All long-running calls to the LLM client are wrapped with exponential back-off
-and proper cancellation handling.
+All long-running calls to the LLM client are wrapped with exponential back-off.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import random
 import time
@@ -21,7 +19,7 @@ from .thought_node import ThoughtNode, ThoughtType, ThoughtStatus
 
 LOGGER = logging.getLogger(__name__)
 
-__all__ = ["StateSnapshot", "ReasoningMetrics", "AsyncGraphOfThoughts"]
+__all__ = ["StateSnapshot", "ReasoningMetrics", "SynchronousGraphOfThoughts"]
 
 
 @dataclass
@@ -48,26 +46,26 @@ class ReasoningMetrics:
     token_efficiency: float
 
 
-class AsyncGraphOfThoughts(GraphOfThoughts):
-    """Concrete Graph-of-Thoughts engine with async reasoning pipeline."""
+class SynchronousGraphOfThoughts(GraphOfThoughts):
+    """Concrete Graph-of-Thoughts engine with a synchronous reasoning pipeline."""
 
     # --------------------- Public entry point ---------------------
 
-    async def reason(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def reason(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Run a complete reasoning cycle and return structured result."""
         start_ts = time.time()
         root_node = self._make_root_node(query)
         self.add_node(root_node)
 
-        snapshot = await self._preserve_llm_state()
+        snapshot = self._preserve_llm_state()
         try:
-            decomp_nodes = await self._decomposition_phase(root_node)
-            exploration_nodes = await self._exploration_phase(decomp_nodes)
-            synthesis_nodes = await self._synthesis_phase(exploration_nodes)
-            final_nodes = await self._validation_phase(synthesis_nodes)
+            decomp_nodes = self._decomposition_phase(root_node)
+            exploration_nodes = self._exploration_phase(decomp_nodes)
+            synthesis_nodes = self._synthesis_phase(exploration_nodes)
+            final_nodes = self._validation_phase(synthesis_nodes)
             answer_node = max(final_nodes, key=lambda n: n.confidence, default=root_node)
         finally:
-            await self._restore_llm_state(snapshot)
+            self._restore_llm_state(snapshot)
 
         elapsed = time.time() - start_ts
         metrics = self._compute_metrics(elapsed)
@@ -107,14 +105,14 @@ class AsyncGraphOfThoughts(GraphOfThoughts):
 
     # ----------------------- Reasoning phases -----------------------
 
-    async def _decomposition_phase(self, root_node: ThoughtNode) -> List[ThoughtNode]:
+    def _decomposition_phase(self, root_node: ThoughtNode) -> List[ThoughtNode]:
         children: List[ThoughtNode] = []
         prompt = (
             "Decompose the following problem into 2-5 sub-problems with clear dependencies. "
             "Return JSON list of objects with keys 'id', 'content', 'confidence'.\n\n"
             f"Problem: {root_node.content}\n"
         )
-        response = await self._call_llm(prompt)
+        response = self._call_llm(prompt)
         try:
             import json  # local import to keep top clean
             items = json.loads(response)
@@ -135,21 +133,17 @@ class AsyncGraphOfThoughts(GraphOfThoughts):
             children.append(child)
         return children
 
-    async def _exploration_phase(self, decomp_nodes: List[ThoughtNode]) -> List[ThoughtNode]:
-        tasks = [self._explore_node(n) for n in decomp_nodes]
+    def _exploration_phase(self, decomp_nodes: List[ThoughtNode]) -> List[ThoughtNode]:
         results: List[ThoughtNode] = []
-        for coro in asyncio.as_completed(tasks, timeout=self.config["execution_timeout"]):
+        for node in decomp_nodes:
             try:
-                node = await coro
-                results.append(node)
-            except asyncio.TimeoutError:
-                LOGGER.warning("Exploration branch timed out")
-            except asyncio.CancelledError:
-                LOGGER.warning("Exploration cancelled")
-                raise
+                explored_node = self._explore_node(node)
+                results.append(explored_node)
+            except Exception as e:
+                LOGGER.warning(f"Exploration of node {node.id} failed: {e}")
         return results
 
-    async def _synthesis_phase(self, exploration_nodes: List[ThoughtNode]) -> List[ThoughtNode]:
+    def _synthesis_phase(self, exploration_nodes: List[ThoughtNode]) -> List[ThoughtNode]:
         # Simple synthesis: concatenate insights
         synthesis_nodes: List[ThoughtNode] = []
         for parent in exploration_nodes:
@@ -157,7 +151,7 @@ class AsyncGraphOfThoughts(GraphOfThoughts):
                 "Synthesize the following insights into a coherent intermediate answer "
                 "with confidence: \n" + parent.content
             )
-            response = await self._call_llm(prompt)
+            response = self._call_llm(prompt)
             child = ThoughtNode(
                 id=str(random_uuid()),
                 content=response.strip(),
@@ -169,13 +163,13 @@ class AsyncGraphOfThoughts(GraphOfThoughts):
             synthesis_nodes.append(child)
         return synthesis_nodes
 
-    async def _validation_phase(self, synthesis_nodes: List[ThoughtNode]) -> List[ThoughtNode]:
+    def _validation_phase(self, synthesis_nodes: List[ThoughtNode]) -> List[ThoughtNode]:
         validated: List[ThoughtNode] = []
         for node in synthesis_nodes:
             prompt = (
                 "Validate the following answer. Rate confidence 0-1 JSON {{'confidence': x}}.\n" + node.content
             )
-            response = await self._call_llm(prompt)
+            response = self._call_llm(prompt)
             try:
                 import json;
                 data = json.loads(response)
@@ -189,7 +183,7 @@ class AsyncGraphOfThoughts(GraphOfThoughts):
 
     # ------------------- State management helpers -------------------
 
-    async def _preserve_llm_state(self) -> StateSnapshot:
+    def _preserve_llm_state(self) -> StateSnapshot:
         if not hasattr(self.llm_client, "get_state"):
             return StateSnapshot(raw_state=None, created_at=time.time(), client_type=type(self.llm_client).__name__)
         try:
@@ -199,7 +193,7 @@ class AsyncGraphOfThoughts(GraphOfThoughts):
             LOGGER.warning("Failed to snapshot LLM state: %s", exc)
             return StateSnapshot(raw_state=None, created_at=time.time(), client_type=type(self.llm_client).__name__)
 
-    async def _restore_llm_state(self, snapshot: StateSnapshot) -> bool:
+    def _restore_llm_state(self, snapshot: StateSnapshot) -> bool:
         if snapshot.raw_state is None:
             return True
         if not snapshot.is_compatible(self.llm_client):
@@ -214,31 +208,26 @@ class AsyncGraphOfThoughts(GraphOfThoughts):
 
     # ---------------------- Utility helpers ------------------------
 
-    async def _call_llm(self, prompt: str, *, max_tokens: int = 256, retries: int = 3) -> str:
+    def _call_llm(self, prompt: str, *, max_tokens: int = 256, retries: int = 3) -> str:
         backoff = self.config["retry_backoff_base"]
         for attempt in range(retries):
             try:
-                result = await asyncio.get_event_loop().run_in_executor(
-                    None, self.llm_client.complete_text, prompt, max_tokens
-                )
+                result = self.llm_client.complete_text(prompt, max_tokens)
                 if not isinstance(result, str) or not result.strip():
                     raise ValueError("LLM returned empty result")
                 return result
-            except asyncio.CancelledError:
-                LOGGER.warning("LLM call cancelled")
-                raise
             except Exception as exc:
                 LOGGER.warning("LLM failure (attempt %d/%d): %s", attempt + 1, retries, exc)
-                await self._async_sleep(backoff)
+                time.sleep(backoff)
                 backoff = min(backoff * 2, self.config["retry_backoff_max"])
         raise RuntimeError("LLM API failed after retries")
 
-    async def _explore_node(self, node: ThoughtNode) -> ThoughtNode:
+    def _explore_node(self, node: ThoughtNode) -> ThoughtNode:
         prompt = (
             "Explore the sub-problem thoroughly and provide detailed reasoning steps "
             "with evidence.\n" + node.content
         )
-        response = await self._call_llm(prompt, max_tokens=512)
+        response = self._call_llm(prompt, max_tokens=512)
         node.content = response.strip()
         node.reasoning_steps.append("explored")
         node.status = ThoughtStatus.IN_PROGRESS

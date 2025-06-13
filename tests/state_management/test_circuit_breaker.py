@@ -73,3 +73,26 @@ def test_circuit_breaker_resets_after_window(circuit_breaker_manager: ThreadSafe
         manager.atomic_update(successful_updater)
     except CircuitBreakerOpenError:
         pytest.fail("Circuit breaker opened when it should have remained closed.")
+
+def test_circuit_breaker_reopens_on_half_open_failure(circuit_breaker_manager: ThreadSafeStateManager):
+    """
+    Verifies that if a call fails in the half-open state, the circuit re-opens immediately.
+    """
+    manager = circuit_breaker_manager
+
+    # 1. Trip the circuit to open it
+    for _ in range(manager._failure_threshold):
+        with pytest.raises(ValueError):
+            manager.atomic_update(failing_updater)
+    
+    # 2. Wait for cooldown to enter half-open state
+    time.sleep(manager._cooldown.total_seconds() + 0.05)
+
+    # 3. Fail the call in the half-open state
+    with pytest.raises(ValueError, match="Simulated update failure"):
+        manager.atomic_update(failing_updater)
+
+    # 4. Verify the circuit is immediately open again
+    assert manager._circuit_state == CircuitBreakerState.OPEN
+    with pytest.raises(CircuitBreakerOpenError):
+        manager.atomic_update(successful_updater)

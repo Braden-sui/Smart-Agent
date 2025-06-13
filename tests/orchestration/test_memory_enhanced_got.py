@@ -1,12 +1,13 @@
 """Integration tests for MemoryEnhancedGoT with mocked Mem0 client."""
 from __future__ import annotations
 
-import asyncio
 import uuid
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
+from simulated_mind.memory.cognitive_dao import RWKV7CognitiveMemoryDAO
+from simulated_mind.memory.usage_tracker import UsageTracker
 from simulated_mind.orchestration.graph_memory import MemoryEnhancedGoT
 from simulated_mind.orchestration.thought_node import ThoughtType
 
@@ -46,15 +47,22 @@ def mock_mem0():
     return client
 
 
-def test_memory_integration(mock_mem0):
+@pytest.fixture
+def cognitive_dao(mock_mem0):
     llm = DummyLLM()
-    got = MemoryEnhancedGoT(llm_client=llm, memory_client=mock_mem0)
+    tracker = UsageTracker()
+    return RWKV7CognitiveMemoryDAO(llm_client=llm, mem0_client=mock_mem0, usage_tracker=tracker)
 
-    result = asyncio.run(got.reason("What is the meaning of life?"))
 
-    # Assert memory searched and stored
-    mock_mem0.search.assert_called_once()
-    mock_mem0.store.assert_called_once()
+def test_memory_integration(cognitive_dao):
+    llm = DummyLLM()
+    got = MemoryEnhancedGoT(llm_client=llm, memory_dao=cognitive_dao)
+
+    result = got.reason("What is the meaning of life?")
+
+    # Assert memory searched and stored via the DAO
+    cognitive_dao.mem0_client.search.assert_called_once()
+    cognitive_dao.mem0_client.store.assert_called_once()
 
     assert "answer" in result
     assert result["answer"]["confidence"] > 0.0

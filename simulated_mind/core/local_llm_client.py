@@ -23,10 +23,11 @@ class LocalLLMClient(ABC):
         pass
 
 class TransformersLocalLLMClient(LocalLLMClient):
-    def __init__(self, model_name: str = "microsoft/DialoGPT-small"):
+    def __init__(self, model_name: str = "microsoft/DialoGPT-small", journal: Optional[Journal] = None):
         self.model = None
         self.tokenizer = None
         self.model_name = model_name
+        self.journal = journal or Journal.null()
         self._load_model()
     def _load_model(self):
         try:
@@ -35,10 +36,11 @@ class TransformersLocalLLMClient(LocalLLMClient):
             self.model = AutoModelForCausalLM.from_pretrained(self.model_name)
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
+            self.journal.log_event("transformers_client.load.success", {"model_name": self.model_name})
         except ImportError:
-            print("Transformers library not available. Install with: pip install transformers torch")
+            self.journal.log_event("transformers_client.load.import_error", {"error": "Transformers library not available. Install with: pip install transformers torch"})
         except Exception as e:
-            print(f"Failed to load model {self.model_name}: {e}")
+            self.journal.log_event("transformers_client.load.fail", {"model_name": self.model_name, "error": str(e)})
     def complete_text(self, prompt: str, max_tokens: int = 512) -> str:
         if not self.is_available():
             raise RuntimeError("Local model not available")
@@ -61,9 +63,19 @@ import copy
 import threading
 from dataclasses import dataclass, field, replace
 from typing import Optional, List, Dict, Any, Tuple, Callable
-from datetime import datetime
+from datetime import datetime, timedelta
+from enum import Enum
 from simulated_mind.journal.journal import Journal
 
+
+class CircuitBreakerState(Enum):
+    CLOSED = "CLOSED"
+    OPEN = "OPEN"
+    HALF_OPEN = "HALF_OPEN"
+
+class CircuitBreakerOpenError(Exception):
+    """Raised when an operation is attempted while the circuit breaker is open."""
+    pass
 
 
 @dataclass(frozen=True)
@@ -74,7 +86,6 @@ class StateSnapshot:
     """
     version: int = 0
     conversation_history: Tuple[Dict[str, str], ...] = field(default_factory=tuple)
-    context_tokens: Tuple[Any, ...] = field(default_factory=tuple)
     metadata: Dict[str, Any] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
@@ -96,13 +107,25 @@ class StateSnapshot:
 
 class ThreadSafeStateManager:
     """
-    Manages state for an LLM client in a thread-safe and observable manner.
+    Manages state for an LLM client in a thread-safe, observable, and resilient manner.
+    Includes a circuit breaker to prevent cascading failures.
     """
-    def __init__(self, max_history: int = 100, journal: Optional[Journal] = None):
+    def __init__(self, max_history: int = 100, journal: Optional[Journal] = None, 
+                 failure_threshold: int = 5, failure_window_seconds: int = 60, cooldown_seconds: int = 30):
         self._lock = threading.RLock()
         self._current: StateSnapshot = StateSnapshot()
         self._max_history = max_history
         self._journal = journal
+
+        # Circuit breaker configuration
+        self._failure_threshold = failure_threshold
+        self._failure_window = timedelta(seconds=failure_window_seconds)
+        self._cooldown = timedelta(seconds=cooldown_seconds)
+
+        # Circuit breaker state
+        self._circuit_state = CircuitBreakerState.CLOSED
+        self._failures: List[datetime] = []
+        self._opened_at: Optional[datetime] = None
 
     def get_current_snapshot(self) -> StateSnapshot:
         """Returns the current state snapshot. It is immutable and safe to share."""
@@ -115,6 +138,8 @@ class ThreadSafeStateManager:
         the current state and must return a new, updated StateSnapshot.
         """
         with self._lock:
+            self._check_circuit_breaker()
+
             try:
                 new_state = updater(self._current)
                 if not isinstance(new_state, StateSnapshot):
@@ -122,7 +147,13 @@ class ThreadSafeStateManager:
                     if self._journal:
                         self._journal.log_event("state_manager:error", {"reason": "InvalidStateSnapshot", "details": str(error)})
                     raise error
+                
+                # If we are in a half-open state and the update succeeds, close the circuit.
+                if self._circuit_state == CircuitBreakerState.HALF_OPEN:
+                    self._reset_circuit()
+
             except Exception as e:
+                self._record_failure()
                 if self._journal:
                     self._journal.log_event("state_manager:error", {"reason": "UpdaterFunctionFailed", "details": str(e)})
                 raise
@@ -162,6 +193,43 @@ class ThreadSafeStateManager:
                     "set_to_version": self._current.version,
                     "timestamp": self._current.timestamp.isoformat()
                 })
+    
+    def _check_circuit_breaker(self):
+        if self._circuit_state == CircuitBreakerState.OPEN:
+            if self._opened_at and (datetime.utcnow() - self._opened_at) > self._cooldown:
+                self._circuit_state = CircuitBreakerState.HALF_OPEN
+                if self._journal:
+                    self._journal.log_event("circuit_breaker:half_open", {})
+            else:
+                raise CircuitBreakerOpenError("Circuit breaker is open.")
+
+    def _record_failure(self):
+        now = datetime.utcnow()
+        self._failures.append(now)
+        
+        # Prune old failures outside the time window
+        self._failures = [t for t in self._failures if now - t <= self._failure_window]
+
+        if len(self._failures) >= self._failure_threshold:
+            self._trip_circuit()
+
+    def _trip_circuit(self):
+        if self._circuit_state != CircuitBreakerState.OPEN:
+            self._circuit_state = CircuitBreakerState.OPEN
+            self._opened_at = datetime.utcnow()
+            if self._journal:
+                self._journal.log_event("circuit_breaker:opened", {
+                    "failure_count": len(self._failures),
+                    "window_seconds": self._failure_window.total_seconds()
+                })
+
+    def _reset_circuit(self):
+        self._failures = []
+        self._circuit_state = CircuitBreakerState.CLOSED
+        self._opened_at = None
+        if self._journal:
+            self._journal.log_event("circuit_breaker:closed", {})
+
 
 class RWKV7GGUFClient(LocalLLMClient):
     """RWKV-7 GGUF implementation for efficient local AI interaction with state support."""
@@ -178,7 +246,8 @@ class RWKV7GGUFClient(LocalLLMClient):
     def load(self):
         """Explicitly load the GGUF model."""
         if self.model is not None:
-            print("Model already loaded.")
+            if self.journal:
+                self.journal.log_event("rwkv7_client.load.already_loaded", {})
             return
         self._load_model()
 
@@ -192,15 +261,15 @@ class RWKV7GGUFClient(LocalLLMClient):
                 n_gpu_layers=0,  # Set to >0 if CUDA/Metal is available and desired
                 verbose=False
             )
-            print(f"✅ RWKV-7 GGUF loaded: {os.path.basename(self.model_path)}")
-            
-            # State is managed by ThreadSafeStateManager, initialized with an empty state.
+            if self.journal:
+                self.journal.log_event("rwkv7_client.load.success", {"model_path": os.path.basename(self.model_path)})
             
         except Exception as e:
-            if isinstance(e, FileNotFoundError) or "No such file or directory" in str(e):
-                print(f"❌ Failed to load RWKV-7 GGUF: Model file not found at {self.model_path}. Please ensure the path is correct and the model is downloaded.")
-            else:
-                print(f"❌ Failed to load RWKV-7 GGUF: {e}")
+            if self.journal:
+                if isinstance(e, FileNotFoundError) or "No such file or directory" in str(e):
+                    self.journal.log_event("rwkv7_client.load.fail", {"reason": "FileNotFound", "model_path": self.model_path, "error": str(e)})
+                else:
+                    self.journal.log_event("rwkv7_client.load.fail", {"reason": "Exception", "error": str(e)})
             self.model = None
 
     def _ensure_model_loaded(self):
@@ -233,7 +302,6 @@ class RWKV7GGUFClient(LocalLLMClient):
         return {
             "version": snapshot.version,
             "conversation_history": history,
-            "context_tokens": list(snapshot.context_tokens),
             "metadata": copy.deepcopy(snapshot.metadata),
             "timestamp": snapshot.timestamp.isoformat(),
             # Legacy fields for compatibility
@@ -256,7 +324,6 @@ class RWKV7GGUFClient(LocalLLMClient):
         new_snapshot = StateSnapshot(
             version=state.get("version", current_snapshot.version + 1),
             conversation_history=tuple(state.get("conversation_history", [])),
-            context_tokens=tuple(state.get("context_tokens", [])),
             metadata=copy.deepcopy(state.get("metadata", {})),
         )
         self._state_manager.set_snapshot(new_snapshot)
@@ -271,9 +338,12 @@ class RWKV7GGUFClient(LocalLLMClient):
             os.makedirs(os.path.dirname(filepath), exist_ok=True)
             with open(filepath, 'w') as f:
                 json.dump(current_state, f, indent=2)
+            if self.journal:
+                self.journal.log_event("rwkv7_client.state.save_success", {"filepath": filepath})
             return True
         except Exception as e:
-            print(f"⚠️ Could not save state to {filepath}: {e}")
+            if self.journal:
+                self.journal.log_event("rwkv7_client.state.save_fail", {"filepath": filepath, "error": str(e)})
             return False
     
     def load_state(self, filepath: str) -> bool:
@@ -283,13 +353,50 @@ class RWKV7GGUFClient(LocalLLMClient):
                 with open(filepath, 'r') as f:
                     state = json.load(f)
                 self.set_state(state)
-                print(f"📖 State loaded from {filepath}")
+                if self.journal:
+                    self.journal.log_event("rwkv7_client.state.load_success", {"filepath": filepath})
                 return True
             return False
         except Exception as e:
-            print(f"⚠️ Could not load state: {e}")
+            if self.journal:
+                self.journal.log_event("rwkv7_client.state.load_fail", {"filepath": filepath, "error": str(e)})
             return False
     
+    # ---------------------------------------------------------------------
+    # Availability check (restored – previously removed by mistake)
+    # ---------------------------------------------------------------------
+    def is_available(self) -> bool:
+        """Return True if the model is loaded or the model file exists."""
+        path_to_check = self.model_path
+        path_exists = False
+
+        if self.journal:
+            self.journal.log_event(
+                "llm_client.is_available.check",
+                {"instance_id": id(self), "model_path": path_to_check}
+            )
+
+        if path_to_check:
+            try:
+                path_exists = os.path.exists(path_to_check)
+                if self.journal:
+                    self.journal.log_event(
+                        "llm_client.is_available.path_check_result", {"exists": path_exists}
+                    )
+            except Exception as e:
+                if self.journal:
+                    self.journal.log_event(
+                        "llm_client.is_available.path_check_error", {"error": str(e)}
+                    )
+        else:
+            if self.journal:
+                self.journal.log_event("llm_client.is_available.path_missing", {})
+
+        result = self.model is not None or (path_to_check and path_exists)
+        if self.journal:
+            self.journal.log_event("llm_client.is_available.final_result", {"result": result})
+        return result
+
     def complete_text(self, prompt: str, max_tokens: int = 512) -> str:
         self._ensure_model_loaded()
         if not self.is_available():
@@ -309,24 +416,16 @@ class RWKV7GGUFClient(LocalLLMClient):
             
             response_text = response['choices'][0]['text'].strip()
             
-            # Update conversation history and state
+            # Update conversation history
             self._update_conversation_history(prompt, response_text)
-            self._update_state_after_generation(prompt, response_text)
             
             return response_text
             
         except Exception as e:
-            print(f"❌ RWKV generation failed: {e}")
+            if self.journal:
+                self.journal.log_event("rwkv7_client.generation.fail", {"error": str(e)})
             raise
-    
-    def _update_state_after_generation(self, prompt: str, response: str):
-        """Update internal state after text generation."""
-        def updater(current_snapshot: StateSnapshot) -> StateSnapshot:
-            new_context_tokens = current_snapshot.context_tokens + (prompt, response)
-            return current_snapshot.with_update(context_tokens=new_context_tokens)
 
-        self.atomic_state_update(updater)
-    
     def _build_minimal_prompt(self, base_prompt: str) -> str:
         """Minimal prompt providing context without role constraints."""
         context = ""
@@ -350,9 +449,6 @@ class RWKV7GGUFClient(LocalLLMClient):
             return current_snapshot.with_update(conversation_history=new_history)
 
         self._state_manager.atomic_update(updater)
-    
-    def is_available(self) -> bool:
-        return self.model is not None
     
     def reset_conversation(self):
         """Resets the state to a new, empty StateSnapshot."""
@@ -378,14 +474,22 @@ except Exception:  # pragma: no cover – fallback if llama_cpp unavailable
 # Expose as module-level symbol expected by unit tests
 Llama = _Llama
 
-def create_local_llm_client(backend: str = "rwkv7-gguf", **kwargs) -> "LocalLLMClient":
+def create_local_llm_client(backend: str = "rwkv7-gguf", journal: Optional[Journal] = None, **kwargs) -> Optional[LocalLLMClient]:
     if backend == "transformers":
-        # Ensure TransformersLocalLLMClient is defined or imported correctly
-        return TransformersLocalLLMClient(**kwargs) 
+        return TransformersLocalLLMClient(
+            model_name=kwargs.get("model_name", "microsoft/DialoGPT-small"),
+            journal=journal
+        )
     elif backend == "rwkv7-gguf":
-        # RWKV7GGUFClient expects 'model_path' in kwargs
-        if 'model_path' not in kwargs:
-            raise ValueError("model_path is required for rwkv7-gguf backend")
-        return RWKV7GGUFClient(**kwargs)
-    else:
-        raise ValueError(f"Unknown backend: {backend}. Supported backends: 'transformers', 'rwkv7-gguf'.")
+        # Ensure required args for RWKV7 are present
+        model_path = kwargs.get("model_path")
+        if not model_path:
+            raise ValueError("`model_path` is required for the `rwkv7-gguf` backend.")
+        
+        return RWKV7GGUFClient(
+            model_path=model_path,
+            context_size=kwargs.get("context_size", 8192),
+            max_history=kwargs.get("max_history", 100),
+            journal=journal
+        )
+    raise ValueError(f"Unknown backend: {backend}. Supported backends: 'transformers', 'rwkv7-gguf'.")

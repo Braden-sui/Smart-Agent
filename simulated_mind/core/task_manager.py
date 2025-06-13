@@ -3,13 +3,15 @@ TaskManager: Manages Goal objects and persists them using MemoryDAO.
 """
 from __future__ import annotations
 from typing import List, Optional, Dict, Any
-from .planner import Goal
-from ..memory.dao import MemoryDAO
-from simulated_mind.journal.journal import Journal
+import json
 import uuid
+from .planner import Goal
+from ..memory.cognitive_dao import RWKV7CognitiveMemoryDAO
+from ..memory.types import MemoryType
+from simulated_mind.journal.journal import Journal
 
 class TaskManager:
-    def __init__(self, memory_dao: MemoryDAO, journal: Optional[Journal] = None, user_id: Optional[str] = None):
+    def __init__(self, memory_dao: RWKV7CognitiveMemoryDAO, journal: Optional[Journal] = None, user_id: Optional[str] = None):
         self.memory_dao = memory_dao
         self.journal = journal or Journal.null()
         self.user_id = user_id or "default_user"
@@ -20,19 +22,19 @@ class TaskManager:
         goal = Goal(id=goal_id, description=description, priority=priority, parent_goal=parent_goal, created_by=created_by)
         self._goal_cache[goal_id] = goal
         try:
-            self.memory_dao.store_memory(
+            content_json = json.dumps({
+                "id": goal.id,
+                "description": goal.description,
+                "priority": goal.priority,
+                "parent_goal": goal.parent_goal.id if goal.parent_goal else None,
+                "created_by": goal.created_by,
+                "sub_goals": [sg.id for sg in goal.sub_goals],
+            })
+            self.memory_dao.add_memory(
                 user_id=self.user_id,
-                memory_id=goal_id,
-                content={
-                    "id": goal.id,
-                    "description": goal.description,
-                    "priority": goal.priority,
-                    "parent_goal": goal.parent_goal.id if goal.parent_goal else None,
-                    "created_by": goal.created_by,
-                    "sub_goals": [sg.id for sg in goal.sub_goals],
-                },
-                tags=["goal"],
-                metadata={"status": "active"}
+                memory_type=MemoryType.META,
+                content=content_json,
+                metadata={"memory_id": goal_id, "tags": ["goal"], "status": "active"}
             )
             self.journal.log_event("task_manager.create_goal", {"goal_id": goal_id, "description": description})
         except Exception as e:
@@ -43,9 +45,16 @@ class TaskManager:
         if goal_id in self._goal_cache:
             return self._goal_cache[goal_id]
         try:
-            data = self.memory_dao.retrieve_memory(self.user_id, goal_id)
-            if data and "content" in data:
-                content = data["content"]
+            results = self.memory_dao.get_memories(
+                user_id=self.user_id,
+                memory_type=MemoryType.META,
+                query="",
+                limit=1,
+                metadata_filter={"memory_id": goal_id}
+            )
+            if results:
+                data = results[0]
+                content = json.loads(data["content"])
                 goal = Goal(
                     id=content["id"],
                     description=content["description"],
@@ -69,19 +78,19 @@ class TaskManager:
             if hasattr(goal, k):
                 setattr(goal, k, v)
         try:
-            self.memory_dao.store_memory(
+            content_json = json.dumps({
+                "id": goal.id,
+                "description": goal.description,
+                "priority": goal.priority,
+                "parent_goal": goal.parent_goal.id if goal.parent_goal else None,
+                "created_by": goal.created_by,
+                "sub_goals": [sg.id for sg in goal.sub_goals],
+            })
+            self.memory_dao.add_memory(
                 user_id=self.user_id,
-                memory_id=goal_id,
-                content={
-                    "id": goal.id,
-                    "description": goal.description,
-                    "priority": goal.priority,
-                    "parent_goal": goal.parent_goal.id if goal.parent_goal else None,
-                    "created_by": goal.created_by,
-                    "sub_goals": [sg.id for sg in goal.sub_goals],
-                },
-                tags=["goal"],
-                metadata={"status": "active"}
+                memory_type=MemoryType.META,
+                content=content_json,
+                metadata={"memory_id": goal_id, "tags": ["goal"], "status": "active"}
             )
             self.journal.log_event("task_manager.update_goal", {"goal_id": goal_id, "updates": kwargs})
             return True
@@ -94,8 +103,8 @@ class TaskManager:
             results = self.memory_dao.find_memories_by_tags(self.user_id, ["goal"])
             goals = []
             for data in results:
-                content = data.get("content", {})
                 if not status or data.get("metadata", {}).get("status") == status:
+                    content = json.loads(data.get("content", "{}"))
                     goal = Goal(
                         id=content["id"],
                         description=content["description"],
@@ -115,19 +124,19 @@ class TaskManager:
             self.journal.log_event("task_manager.complete_goal_error", {"error": "Goal not found", "goal_id": goal_id})
             return False
         try:
-            self.memory_dao.store_memory(
+            content_json = json.dumps({
+                "id": goal.id,
+                "description": goal.description,
+                "priority": goal.priority,
+                "parent_goal": goal.parent_goal.id if goal.parent_goal else None,
+                "created_by": goal.created_by,
+                "sub_goals": [sg.id for sg in goal.sub_goals],
+            })
+            self.memory_dao.add_memory(
                 user_id=self.user_id,
-                memory_id=goal_id,
-                content={
-                    "id": goal.id,
-                    "description": goal.description,
-                    "priority": goal.priority,
-                    "parent_goal": goal.parent_goal.id if goal.parent_goal else None,
-                    "created_by": goal.created_by,
-                    "sub_goals": [sg.id for sg in goal.sub_goals],
-                },
-                tags=["goal"],
-                metadata={"status": "completed"}
+                memory_type=MemoryType.META,
+                content=content_json,
+                metadata={"memory_id": goal_id, "tags": ["goal"], "status": "completed"}
             )
             self.journal.log_event("task_manager.complete_goal", {"goal_id": goal_id})
             return True

@@ -3,14 +3,13 @@ Run with: pytest -q tests/orchestration/test_thought_graph.py
 """
 from __future__ import annotations
 
-import asyncio
 import uuid
 
 import pytest
 
 from simulated_mind.orchestration.thought_node import ThoughtNode, ThoughtStatus, ThoughtType
 from simulated_mind.orchestration.graph_core import GraphOfThoughts
-from simulated_mind.orchestration.graph_reasoning import AsyncGraphOfThoughts
+from simulated_mind.orchestration.graph_reasoning import SynchronousGraphOfThoughts
 
 
 class DummyLLM:
@@ -87,14 +86,14 @@ def test_graph_add_and_cycle_detection():
 
 
 # -------------------------------------------------------------------------
-# AsyncGraphOfThoughts reasoning smoke test (happy path)
+# SynchronousGraphOfThoughts reasoning smoke test (happy path)
 # -------------------------------------------------------------------------
 
-def test_async_reasoning_cycle():
+def test_sync_reasoning_cycle():
     dummy = DummyLLM()
-    got = AsyncGraphOfThoughts(dummy)
+    got = SynchronousGraphOfThoughts(dummy)
 
-    result = asyncio.run(got.reason("Simple test problem"))
+    result = got.reason("Simple test problem")
     assert "answer" in result
     assert result["answer"]["confidence"] > 0.0
     assert result["metadata"]["total_nodes"] >= 1

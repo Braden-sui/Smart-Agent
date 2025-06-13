@@ -289,6 +289,65 @@ class Mem0Client:  # pragma: no cover – stub for SDK interaction
             return True
         return False
 
+    def search(
+        self,
+        query: str,
+        user_id: Optional[str] = "default_user",
+        limit: int = 10,
+        filters: Optional[Dict[str, Any]] = None,
+        **kwargs
+    ) -> List[Dict[str, Any]]:
+        """Search for memories using a query string and optional filters."""
+        user_id = user_id or "default_user"
+
+        if self.sdk_active and self.client:
+            try:
+                filters = {"user_id": user_id}
+                final_filters = filters or {}
+                final_filters['user_id'] = user_id
+
+                search_params = {
+                    "query": query,
+                    "filters": final_filters,
+                    "limit": limit,
+                    "version": "v2",
+                    **kwargs
+                }
+                sdk_results = self.client.search(**search_params)
+
+                results = []
+                for item in sdk_results:
+                    if hasattr(item, 'to_dict'):
+                        item = item.to_dict()
+                    results.append({
+                        "memory_id": item.get('id'),
+                        "content": item.get('content'),
+                        **item.get('metadata', {})
+                    })
+                self._log_sdk(f"Found {len(results)} memories for query: '{query}'")
+                return results
+            except Exception as e:
+                self._log_error(f"Search failed: {e}", e)
+
+        # Fallback implementation
+        self._log_warning(f"Using fallback search for query: {query}")
+        user_store = self._kv_fallback.get(user_id, {})
+        results = []
+        for mem_id, mem_data in user_store.items():
+            content_str = str(mem_data.get('content', ''))
+            if query == "*" or query.lower() in content_str.lower():
+                match = True
+                if filters:
+                    for key, value in filters.items():
+                        if mem_data.get(key) != value:
+                            match = False
+                            break
+                if match:
+                    results.append({"memory_id": mem_id, **mem_data})
+            if len(results) >= limit:
+                break
+        return results
+
     def search_memories_by_tags(
         self, 
         tags: List[str], 

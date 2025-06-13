@@ -9,7 +9,7 @@ from __future__ import annotations
 import time
 import uuid
 
-from simulated_mind.orchestration.graph_reasoning import AsyncGraphOfThoughts
+from simulated_mind.orchestration.graph_reasoning import SynchronousGraphOfThoughts
 
 
 class DummyLLM:
@@ -39,13 +39,10 @@ class DummyLLM:
 
 def test_reasoning_latency():
     llm = DummyLLM()
-    got = AsyncGraphOfThoughts(llm)
+    got = SynchronousGraphOfThoughts(llm)
 
     start = time.perf_counter()
-    # Synchronous wrapper; asyncio.run is fine inside pytest normal test
-    import asyncio
-
-    asyncio.run(got.reason("benchmark problem"))
+    got.reason("benchmark problem")
     elapsed = time.perf_counter() - start
 
     # Fails if latency exceeds 0.5 seconds (generous for CI)

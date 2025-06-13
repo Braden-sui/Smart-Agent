@@ -1,10 +1,10 @@
-from .cognitive_dao import MemoryType
+from .types import MemoryType
 
 class BudgetExceededError(Exception):
     """Exception raised when a memory budget is exceeded."""
     pass
 
-class Mem0UsageTracker:
+class UsageTracker:
     """Tracks Mem0 Pro API usage against defined budgets."""
 
     def __init__(self, max_memories: int = 50000, max_retrievals: int = 5000):
