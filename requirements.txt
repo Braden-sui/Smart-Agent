@@ -3,3 +3,5 @@ GPUtil
 pytest
 mem0ai
 PyYAML
+crewai==0.28.0
+langgraph==0.0.40

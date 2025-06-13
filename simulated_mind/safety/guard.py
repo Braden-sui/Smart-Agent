@@ -6,7 +6,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from ..journal.journal import Journal
+from simulated_mind.journal.journal import Journal
 
 
 class SafetyGuard:

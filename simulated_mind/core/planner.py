@@ -17,64 +17,8 @@ from .logic_graph import LogicGraph
 from .logic_primitives import PRIMITIVE_REGISTRY
 
 
-try:
-    from ..journal.journal import Journal
-except ImportError:
-    if __name__ == '__main__':
-        # Define a placeholder Journal class for self-testing when run directly
-        class Journal:
-            def __init__(self, sink=None):
-                self.sink = sink
-                # print(f"DEBUG_SELF_TEST: Using placeholder Journal class (sink: {type(sink)})", file=sys.stderr); sys.stderr.flush()
-
-            def log_event(self, label: str, payload: Dict[str, Any]):
-                # print(f"DEBUG_PLACEHOLDER_JOURNAL: log_event('{label}', {payload})", file=sys.stderr); sys.stderr.flush()
-                pass
-
-            @classmethod
-            def null(cls):
-                # print("DEBUG_SELF_TEST: Placeholder Journal.null() called", file=sys.stderr); sys.stderr.flush()
-                return cls(sink=None)
-    else:
-        # If not running as main, this is a real import error in the package
-        raise
-from unittest.mock import Mock, ANY
-# Removed TaskManager and MemoryStore imports as they cause ModuleNotFoundError
-# and are only used for Mock spec in the self-test.
-# Placeholders will be defined in the if __name__ == '__main__' block.
-try:
-    # Attempt relative import first (standard for package structure)
-    from ..templates.planner_rules import TEMPLATES, GRAPH_TEMPLATES
-except ImportError as e_relative:
-    if __name__ == '__main__':
-        # If relative import fails and we're running as a script (e.g., self-test),
-        # try an absolute import.
-        # print(f"DEBUG_SELF_TEST: Relative import of TEMPLATES failed: {e_relative}. Trying absolute import.", file=sys.stderr); sys.stderr.flush()
-        try:
-            # Add project root to sys.path to enable absolute import from simulated_mind
-            # Assumes planner.py is in simulated_mind/core/
-            project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-            if project_root not in sys.path:
-                sys.path.insert(0, project_root)
-            # print(f"DEBUG_SELF_TEST: Added to sys.path for TEMPLATES import: {project_root}", file=sys.stderr); sys.stderr.flush()
-            # print(f"DEBUG_SELF_TEST: Current sys.path: {sys.path}", file=sys.stderr); sys.stderr.flush()
-
-            from simulated_mind.journal.templates.planner_rules import TEMPLATES
-            # print(f"DEBUG_SELF_TEST: Successfully imported TEMPLATES via absolute path. Keys: {list(TEMPLATES.keys()) if TEMPLATES is not None else 'None'}", file=sys.stderr); sys.stderr.flush()
-            from simulated_mind.journal.templates.planner_rules import GRAPH_TEMPLATES # Also import GRAPH_TEMPLATES here
-            print(f"DEBUG_PLANNER_IMPORT: Fallback import successful. GRAPH_TEMPLATES keys: {list(GRAPH_TEMPLATES.keys()) if GRAPH_TEMPLATES else 'EMPTY'}", file=sys.stderr); sys.stderr.flush()
-
-        except ImportError as e_absolute:
-            # print(f"DEBUG_SELF_TEST: Absolute import of TEMPLATES also failed: {e_absolute}. Falling back to empty TEMPLATES.", file=sys.stderr); sys.stderr.flush()
-            TEMPLATES: Dict[str, List[str]] = {}
-        except Exception as e_general_absolute_import:
-            # print(f"DEBUG_SELF_TEST: General error during absolute import of TEMPLATES: {e_general_absolute_import}. Falling back to empty TEMPLATES.", file=sys.stderr); sys.stderr.flush()
-            TEMPLATES: Dict[str, List[str]] = {}
-            GRAPH_TEMPLATES: Dict[str, str] = {} # Fallback for GRAPH_TEMPLATES as well
-    else:
-        # If not running as __main__ (i.e., part of the package), the relative import should have worked.
-        # Re-raise the original relative import error.
-        raise e_relative
+from ..journal.journal import Journal
+from ..templates.planner_rules import TEMPLATES, GRAPH_TEMPLATES
 
 # print(file=sys.stderr,f"DEBUG: TEMPLATES loaded at module level: {bool(TEMPLATES)} Keys: {list(TEMPLATES.keys()) if TEMPLATES else 'None'}") # Commented out: module-level print causing issues
 
@@ -311,13 +255,121 @@ class Planner:
             # import traceback; traceback.print_exc(file=sys.stderr) # Debug
             return None
 
+    def _create_plan_from_got_graph(self, goal_description: str, initial_context_data: Optional[Dict[str, Any]] = None) -> Optional[List['Goal']]:
+        """
+        Create a plan using Graph-of-Thoughts reasoning with RWKV7.
+        Enhanced version of _create_plan_from_graph with GoT capabilities.
+        """
+        from ..orchestration.graph_of_thoughts import create_got_engine
+        self.journal.log_event("planner.got_graph.start", {"goal": goal_description})
+        # Check if this is a GoT-compatible goal
+        if not self._is_got_suitable(goal_description):
+            return None
+        try:
+            # Create GoT engine if we have RWKV7 client
+            if not self.local_llm_client or not hasattr(self.local_llm_client, 'model'):
+                self.journal.log_event("planner.got_graph.no_rwkv7", {"goal": goal_description})
+                return None
+            got_engine = create_got_engine(self.local_llm_client, self.journal)
+            # Load GoT reasoning template
+            got_graph_path = "simulated_mind/templates/graphs/got_multi_step_reasoning.yaml"
+            absolute_path = os.path.normpath(os.path.join(
+                os.path.dirname(__file__), '..', '..', got_graph_path
+            ))
+            if not os.path.exists(absolute_path):
+                self.journal.log_event("planner.got_graph.template_missing", {"path": absolute_path})
+                return None
+            got_graph = LogicGraph.load_from_yaml(absolute_path)
+            reasoning_context = got_engine.create_reasoning_context(
+                goal_description, 
+                reasoning_type="analytical"
+            )
+            # Execute GoT reasoning
+            final_context = got_engine.execute_graph_of_thoughts(
+                got_graph, 
+                reasoning_context, 
+                base_prompt=f"Break down this goal into actionable steps: {goal_description}"
+            )
+            if final_context.get_error():
+                self.journal.log_event("planner.got_graph.execution_error", {
+                    "goal": goal_description,
+                    "error": final_context.get_error()
+                })
+                return None
+            # Extract sub-goals from GoT reasoning
+            final_response = final_context.get_variable('final_response', '')
+            sub_goals = self._parse_goals_from_got_response(final_response)
+            if sub_goals:
+                self.journal.log_event("planner.got_graph.success", {
+                    "goal": goal_description,
+                    "sub_goals_count": len(sub_goals),
+                    "reasoning_quality": len(final_response)
+                })
+                goals = []
+                for i, sub_goal in enumerate(sub_goals):
+                    goal = self._make_goal(
+                        description=sub_goal,
+                        created_by="got_reasoning",
+                        priority=5,
+                        parent_goal=None
+                    )
+                    goals.append(self._persist_goal(goal))
+                return goals
+            return None
+        except Exception as e:
+            self.journal.log_event("planner.got_graph.error", {
+                "goal": goal_description,
+                "error": str(e)
+            })
+            return None
+
+    def _is_got_suitable(self, goal_description: str) -> bool:
+        """Check if goal is suitable for Graph-of-Thoughts reasoning."""
+        got_indicators = [
+            "analyze", "compare", "evaluate", "design", "strategy", 
+            "complex", "multi-step", "reasoning", "problem-solving"
+        ]
+        return any(indicator in goal_description.lower() for indicator in got_indicators)
+
+    def _parse_goals_from_got_response(self, response: str) -> List[str]:
+        """Parse sub-goals from Graph-of-Thoughts response."""
+        import re
+        patterns = [
+            r'^\d+\.\s*(.+)$',  # 1. Step one
+            r'^-\s*(.+)$',      # - Step
+            r'^Step\s*\d+:\s*(.+)$',  # Step 1: Action
+            r'^\*\s*(.+)$'      # * Bullet
+        ]
+        goals = []
+        for line in response.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+            for pattern in patterns:
+                match = re.match(pattern, line, re.IGNORECASE)
+                if match and len(match.group(1)) > 10:  # Minimum goal length
+                    goals.append(match.group(1).strip())
+                    break
+        return goals[:10]  # Limit to 10 sub-goals
+
     def create_plan(self, goal_description: str) -> List[Goal]:
         """Creates a plan (list of Goal objects) for a given goal description.
-        Attempts to use graph-based planning first, then falls back to template/memory-based decomposition.
+        Enhanced with Graph-of-Thoughts reasoning for complex goals.
+        Priority: GoT -> Graph-based -> Template/Memory-based decomposition.
         Persists all subgoals via TaskManager if available.
         """
         self.journal.log_event("planner.create_plan.start", {"goal": goal_description})
-        # 1. Attempt graph-based planning
+        # 1. Attempt Graph-of-Thoughts planning for suitable goals
+        if hasattr(self, 'local_llm_client') and self.local_llm_client:
+            got_sub_tasks = self._create_plan_from_got_graph(goal_description)
+            if got_sub_tasks is not None:
+                self.journal.log_event("planner.create_plan.source", {
+                    "goal": goal_description, 
+                    "source": "got_reasoning", 
+                    "sub_tasks_count": len(got_sub_tasks)
+                })
+                return got_sub_tasks
+        # 2. Attempt traditional graph-based planning
         graph_sub_tasks = self._create_plan_from_graph(goal_description)
         goals: List[Goal] = []
         if graph_sub_tasks is not None:
@@ -328,11 +380,15 @@ class Planner:
                 else:
                     goals.append(self._persist_goal(self._make_goal(sub, created_by="planner_graph")))
             return goals
-        # 2. Fallback to existing decomposition logic (templates, memory, generic)
+        # 3. Fallback to existing decomposition logic
         self.journal.log_event("planner.create_plan.fallback_to_decompose", {"goal": goal_description})
-        fallback_sub_tasks = self.decompose_goal(goal_description)
-        self.journal.log_event("planner.create_plan.source", {"goal": goal_description, "source": "decompose_goal_fallback", "sub_tasks_count": len(fallback_sub_tasks)})
-        for sub in fallback_sub_tasks:
+        fallback_goals = self.decompose_goal(goal_description)
+        self.journal.log_event("planner.create_plan.source", {
+            "goal": goal_description, 
+            "source": "decompose_goal_fallback", 
+            "sub_tasks_count": len(fallback_goals)
+        })
+        for sub in fallback_goals:
             if isinstance(sub, Goal):
                 goals.append(self._persist_goal(sub))
             else:

@@ -220,9 +220,157 @@ def evaluate_goal(context: LogicContext, args: Dict[str, Any]) -> PrimitiveResul
     return PrimitiveResult(True, value=sub_goal_outcome)
 
 
+# --- RWKV7 Graph-of-Thoughts Primitives ---
+def rwkv7_state_init(context: LogicContext, args: Dict[str, Any]) -> PrimitiveResult:
+    """
+    RWKV7_STATE_INIT: Initialize RWKV7 state for Graph-of-Thoughts processing.
+    Args:
+        context: LogicContext containing 'rwkv_client' and 'base_prompt'
+        args: Dict with 'context_prompt' for state initialization
+    Returns:
+        PrimitiveResult with base_state stored in context
+    """
+    rwkv_client = context.get_variable('rwkv_client')
+    if not rwkv_client or not hasattr(rwkv_client, 'model'):
+        return PrimitiveResult(False, error_message="RWKV7 client not available or invalid")
+    context_prompt = args.get('context_prompt', 'Initialize reasoning state for complex problem solving.')
+    try:
+        rwkv_client.complete_text(context_prompt, max_tokens=1)
+        base_state = rwkv_client.model.get_state()
+        context.set_variable('base_state', base_state)
+        context.set_variable('thought_states', {})
+        return PrimitiveResult(True, value={'base_state_initialized': True})
+    except Exception as e:
+        return PrimitiveResult(False, error_message=f"State initialization failed: {str(e)}")
+
+def rwkv7_thought_generation(context: LogicContext, args: Dict[str, Any]) -> PrimitiveResult:
+    """
+    RWKV7_THOUGHT_GENERATION: Generate diverse thoughts using RWKV7 state variations.
+    Args:
+        context: LogicContext with 'rwkv_client' and 'base_state'
+        args: Dict with 'thought_prompts' (list of strings) and optional 'branching_factor'
+    Returns:
+        PrimitiveResult with thought_states stored in context
+    """
+    rwkv_client = context.get_variable('rwkv_client')
+    base_state = context.get_variable('base_state')
+    if not rwkv_client or base_state is None:
+        return PrimitiveResult(False, error_message="RWKV7 client or base state not available")
+    thought_prompts = args.get('thought_prompts', [])
+    branching_factor = args.get('branching_factor', len(thought_prompts))
+    if not thought_prompts:
+        return PrimitiveResult(False, error_message="No thought prompts provided")
+    thought_states = {}
+    try:
+        for i, prompt in enumerate(thought_prompts[:branching_factor]):
+            rwkv_client.model.set_state(base_state)
+            response = rwkv_client.complete_text(prompt, max_tokens=150)
+            thought_state = rwkv_client.model.get_state()
+            thought_states[f"thought_{i}"] = {
+                'prompt': prompt,
+                'response': response,
+                'state': thought_state,
+                'index': i
+            }
+        context.set_variable('thought_states', thought_states)
+        return PrimitiveResult(True, value={
+            'thoughts_generated': len(thought_states),
+            'thought_ids': list(thought_states.keys())
+        })
+    except Exception as e:
+        return PrimitiveResult(False, error_message=f"Thought generation failed: {str(e)}")
+
+def rwkv7_state_scoring(context: LogicContext, args: Dict[str, Any]) -> PrimitiveResult:
+    """
+    RWKV7_STATE_SCORING: Score thoughts using RWKV7 state analysis.
+    Args:
+        context: LogicContext with 'thought_states'
+        args: Dict with 'scoring_prompt' (string) and optional 'scoring_fn'
+    Returns:
+        PrimitiveResult with scored_thoughts in context
+    """
+    rwkv_client = context.get_variable('rwkv_client')
+    thought_states = context.get_variable('thought_states')
+    if not rwkv_client or not thought_states:
+        return PrimitiveResult(False, error_message="RWKV7 client or thought states not available")
+    scoring_prompt = args.get('scoring_prompt', 'Score this thought for relevance and quality.')
+    scoring_fn = args.get('scoring_fn')  # Optional custom scoring function
+    scored_thoughts = {}
+    try:
+        for key, data in thought_states.items():
+            rwkv_client.model.set_state(data['state'])
+            if scoring_fn and callable(scoring_fn):
+                score = scoring_fn(data['response'])
+            else:
+                # Default: ask model to score its own output
+                score_resp = rwkv_client.complete_text(f"{scoring_prompt}\nThought: {data['response']}\nScore (0-10):", max_tokens=5)
+                try:
+                    score = float(score_resp.strip().split()[0])
+                except Exception:
+                    score = 0.0
+            scored_thoughts[key] = {**data, 'score': score}
+        context.set_variable('scored_thoughts', scored_thoughts)
+        return PrimitiveResult(True, value={'scored_thoughts': scored_thoughts})
+    except Exception as e:
+        return PrimitiveResult(False, error_message=f"State scoring failed: {str(e)}")
+
+def rwkv7_state_merge(context: LogicContext, args: Dict[str, Any]) -> PrimitiveResult:
+    """
+    RWKV7_STATE_MERGE: Merge multiple RWKV7 states to form a consensus or best state.
+    Args:
+        context: LogicContext with 'scored_thoughts'
+        args: Dict with 'merge_strategy' (string)
+    Returns:
+        PrimitiveResult with merged_state in context
+    """
+    rwkv_client = context.get_variable('rwkv_client')
+    scored_thoughts = context.get_variable('scored_thoughts')
+    if not rwkv_client or not scored_thoughts:
+        return PrimitiveResult(False, error_message="RWKV7 client or scored thoughts not available")
+    merge_strategy = args.get('merge_strategy', 'best_score')
+    try:
+        if merge_strategy == 'best_score':
+            best = max(scored_thoughts.values(), key=lambda x: x.get('score', 0))
+            merged_state = best['state']
+        else:
+            # Placeholder: other strategies could include averaging or voting
+            merged_state = list(scored_thoughts.values())[0]['state']
+        context.set_variable('merged_state', merged_state)
+        return PrimitiveResult(True, value={'merged_state': merged_state})
+    except Exception as e:
+        return PrimitiveResult(False, error_message=f"State merge failed: {str(e)}")
+
+def rwkv7_state_response(context: LogicContext, args: Dict[str, Any]) -> PrimitiveResult:
+    """
+    RWKV7_STATE_RESPONSE: Generate a final response using the merged RWKV7 state.
+    Args:
+        context: LogicContext with 'rwkv_client' and 'merged_state'
+        args: Dict with 'response_prompt' (string)
+    Returns:
+        PrimitiveResult with final response
+    """
+    rwkv_client = context.get_variable('rwkv_client')
+    merged_state = context.get_variable('merged_state')
+    if not rwkv_client or merged_state is None:
+        return PrimitiveResult(False, error_message="RWKV7 client or merged state not available")
+    response_prompt = args.get('response_prompt', 'Produce the final answer based on merged reasoning.')
+    try:
+        rwkv_client.model.set_state(merged_state)
+        response = rwkv_client.complete_text(response_prompt, max_tokens=200)
+        context.set_variable('final_response', response)
+        return PrimitiveResult(True, value={'final_response': response})
+    except Exception as e:
+        return PrimitiveResult(False, error_message=f"Response generation failed: {str(e)}")
+
 # --- Primitive Registry --- (Initial thought, could be a class in LogicEngine)
 PRIMITIVE_REGISTRY: Dict[str, Callable[[LogicContext, PrimitiveArgs], PrimitiveResult]] = {
     "SEQ": execute_sequence,
+    # RWKV7 Graph-of-Thoughts Primitives
+    "RWKV7_STATE_INIT": rwkv7_state_init,
+    "RWKV7_THOUGHT_GENERATION": rwkv7_thought_generation,
+    "RWKV7_STATE_SCORING": rwkv7_state_scoring,
+    "RWKV7_STATE_MERGE": rwkv7_state_merge,
+    "RWKV7_STATE_RESPONSE": rwkv7_state_response,
     "PAR": execute_parallel,
     "COND": evaluate_condition,
     "CALL": execute_call,

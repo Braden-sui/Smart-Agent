@@ -95,6 +95,36 @@ ENV/
 env.bak/
 venv.bak/
 
+# Project specific
+.conda_env
+
+# Temporary files with percentage signs and brackets
+*%
+*]
+*[
+*~
+
+# Ignore all files with percentage signs and brackets at the end
+*%]*
+*]*
+[*
+
+# Ignore specific directories
+companion_memory/
+
+# Ignore test artifacts
+.pytest_cache/
+
+# Ignore system files
+.DS_Store
+Thumbs.db
+
+# Ignore IDE specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+
 # Spyder project settings
 .spyderproject
 .spyproject
