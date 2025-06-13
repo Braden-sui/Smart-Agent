@@ -43,13 +43,32 @@ Execution flow:
 
 ---
 
-## 3. How to Run Tests
+## 3. Environment setup & running tests
 
-```bash
-python -m venv .venv && source .venv/bin/activate  # or PowerShell equivalent
-pip install -r requirements.txt  # (only std-lib required today)
-pytest -q
-```
+1. **Create the conda env once** (or update if it already exists):
+    ```powershell
+    conda env create -f environment.yml  # or `conda env update -f ...`
+    ```
+2. The repo contains a `.conda_env` marker (generated on checkout).  Add the auto-activate snippet shown below to your **PowerShell $PROFILE** so every shell that starts inside this repo (or `cd`’s into it) automatically activates the env.
+
+    ```powershell
+    # --- Auto-activate conda env when .conda_env file present ---
+    function Invoke-AutoConda {
+        $marker = Get-ChildItem -Path (Get-Location) -Name ".conda_env" -ErrorAction SilentlyContinue
+        if ($marker) {
+            $envName = Get-Content ".conda_env" | Select-Object -First 1
+            if ($env:CONDA_DEFAULT_ENV -ne $envName) {
+                & conda activate $envName 2>$null
+            }
+        }
+    }
+    Invoke-AutoConda
+    Register-EngineEvent PowerShell.OnLocationChanged -Action { Invoke-AutoConda } | Out-Null
+    ```
+3. **Run tests** (now that the env is auto-activated):
+    ```powershell
+    pytest -q
+    ```
 
 ---
 

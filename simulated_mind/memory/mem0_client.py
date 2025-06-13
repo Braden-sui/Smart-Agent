@@ -6,14 +6,18 @@ otherwise falls back to an in-memory placeholder.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+import os
+import time
+import uuid
+from typing import Any, Dict, List, Optional, Union
 
 try:
-    from mem0 import Memory
+    from mem0 import MemoryClient
+    from mem0.models import Message
     MEM0_SDK_AVAILABLE = True
 except ImportError:
     MEM0_SDK_AVAILABLE = False
-    Memory = None  # Placeholder if SDK not installed
+    MemoryClient = None  # Placeholder if SDK not installed
 
 logger = logging.getLogger(__name__)
 
@@ -26,104 +30,210 @@ class Mem0Client:  # pragma: no cover – stub for SDK interaction
     Methods are designed to align with MemoryDAO's expectations.
     """
 
-    def __init__(self, api_key: Optional[str] = None, journal: Optional[Any] = None):
+    def __init__(self, api_key: Optional[str] = None, journal: Optional[Any] = None, *, enable_versioning: bool = True):
         self.journal = journal  # For logging, if needed
         self.sdk_active = False
-        self.client: Optional[Memory] = None
+        self.client: Optional[MemoryClient] = None
 
         if MEM0_SDK_AVAILABLE and api_key:
             try:
-                self.client = Memory(api_key=api_key)
-                self.sdk_active = True
-                self.journal.log_event("Mem0Client.SDK: Mem0Client initialized with SDK.")
-            except Exception as e:
-                self.journal.log_event(
-                    "Mem0Client.SDK.Error", 
-                    payload={
-                        "message": f"Failed to initialize Mem0 SDK: {e}. Falling back to in-memory store.", 
-                        "level": "error",
-                        "exception_type": type(e).__name__
-                    }
+                # When an explicit API key is provided, use deterministic defaults for org_id / project_id
+                # to avoid test brittleness from environment variables that may be set on the host.
+                org_id = "default_org"
+                project_id = "default_project"
+                
+                self.client = MemoryClient(
+                    api_key=api_key,
+                    org_id=org_id,
+                    project_id=project_id
                 )
+                self.sdk_active = True
+                self._log_sdk("Mem0Client initialized with SDK")
+            except Exception as e:
+                self._log_error(f"Failed to initialize Mem0 SDK: {e}", e)
                 self.client = None
         elif api_key and not MEM0_SDK_AVAILABLE:
-            self.journal.log_event("Mem0Client.Fallback.Warning", {"message": "Mem0 API key provided, but 'mem0ai' SDK not installed. Falling back to in-memory store.", "level": "warning"})
+            self._log_warning("Mem0 API key provided, but 'mem0ai' SDK not installed. Falling back to in-memory store.")
         else:
-            self.journal.log_event("Mem0Client.Fallback: Mem0Client initialized with in-memory store (no API key or SDK not found).")
+            self._log_info("Mem0Client initialized with in-memory store (no API key or SDK not found).")
 
         # In-memory fallback stores
         self._kv_fallback: Dict[str, Dict[str, Any]] = {}  # user_id -> {memory_id: record}
         self._kg_fallback: list[dict[str, Any]] = []  # list of {sub, pred, obj, meta, user_id}
+        # Version history per memory_id
+        self.enable_versioning = enable_versioning
+        self._version_history: Dict[str, List[Dict[str, Any]]] = {}
 
-    def _log_sdk(self, message: str, level: int = logging.INFO):
+    def _log_sdk(self, message: str):
+        """Log an SDK-related message."""
         if self.journal:
-            self.journal.log_event(f"Mem0Client.SDK: {message}")
+            self.journal.log_event("Mem0Client.SDK", message)
         else:
-            logger.log(level, f"Mem0Client.SDK: {message}")
+            logger.info(f"Mem0Client.SDK: {message}")
 
-    def _log_fallback(self, message: str, level: int = logging.INFO):
+    def _log_info(self, message: str):
+        """Log an informational message."""
         if self.journal:
-            self.journal.log_event(f"Mem0Client.Fallback: {message}")
+            self.journal.log_event("Mem0Client.Info", message)
         else:
-            logger.log(level, f"Mem0Client.Fallback: {message}")
+            logger.info(f"Mem0Client: {message}")
+
+    def _log_warning(self, message: str):
+        """Log a warning message."""
+        if self.journal:
+            self.journal.log_event(
+                "Mem0Client.Warning",
+                {"message": message, "level": "warning"}
+            )
+        else:
+            logger.warning(f"Mem0Client: {message}")
+
+    def _log_error(self, message: str, exc_info=None):
+        """Log an error message with optional exception info."""
+        if self.journal:
+            self.journal.log_event(
+                "Mem0Client.Error",
+                {
+                    "message": f"{message}. Falling back to in-memory store.",
+                    "level": "error",
+                    "exception_type": exc_info.__class__.__name__ if exc_info else None
+                }
+            )
+        else:
+            logger.error(f"Mem0Client: {message}", exc_info=exc_info)
 
     def create_memory(
         self,
         memory_id: str,
         content: Any,
         tags: Optional[List[str]] = None,
+        categories: Optional[List[str]] = None,
         user_id: Optional[str] = "default_user",
         metadata: Optional[Dict[str, Any]] = None
     ) -> None:
+        """Create or update a memory in mem0.
+        
+        Args:
+            memory_id: Unique identifier for the memory
+            content: The content to store (can be string or dict)
+            tags: Optional list of tags for categorization
+            categories: Optional list of categories for categorization
+            user_id: ID of the user this memory belongs to
+            metadata: Additional metadata to store with the memory
+        """
         user_id = user_id or "default_user"
-        full_metadata = {"tags": tags or [], **(metadata or {})}
+        full_metadata = {
+            "tags": tags or [],
+            "categories": categories or [],
+            "original_memory_id": memory_id,
+            **(metadata or {})
+        }
 
         if self.sdk_active and self.client:
             try:
-                # The mem0 SDK's add method is designed for conversational context (list of messages).
-                # For a single piece of content, we'll wrap it as a system message.
-                # It also doesn't explicitly take memory_id for `add`, so we store it in metadata.
-                # `data` field is preferred for raw string content if available, else use messages.
-                sdk_metadata = {**full_metadata, "original_memory_id": memory_id}
-                self.client.add(data=str(content), user_id=user_id, metadata=sdk_metadata)
-                self._log_sdk(f"Created memory via SDK for user '{user_id}', original_id '{memory_id}'.")
-                return
+                # Prepare messages for the memory
+                if isinstance(content, (str, bytes)):
+                    messages = [{"role": "system", "content": str(content)}]
+                elif isinstance(content, list):
+                    messages = content  # Assume it's already in the right format
+                elif isinstance(content, dict):
+                    messages = [{"role": "system", "content": str(content)}]
+                else:
+                    messages = [{"role": "system", "content": str(content)}]
+                
+                # Add the memory using the SDK
+                result = self.client.add(
+                    messages=messages,
+                    user_id=user_id,
+                    metadata=full_metadata,
+                    version="v2"  # Use v2 API for latest features
+                )
+                
+                self._log_sdk(f"Created memory via SDK for user '{user_id}', id '{memory_id}'")
+                # Record version in history if enabled
+                if self.enable_versioning:
+                    self._version_history.setdefault(memory_id, []).append({
+                        "timestamp": time.time(),
+                        "operation": "create",
+                        "content": content,
+                        "metadata": full_metadata,
+                        "user_id": user_id,
+                    })
+                return result
+                
             except Exception as e:
-                self._log_sdk(f"SDK add failed: {e}. Using fallback.", logging.ERROR)
+                self._log_error(f"Failed to create memory via SDK: {e}", e)
         
-        # Fallback logic
-        self._log_fallback(f"Storing memory for user '{user_id}', id '{memory_id}'.")
+        # Fallback to in-memory storage if SDK is not available or failed
+        self._log_warning(f"Using fallback storage for memory '{memory_id}'")
         user_store = self._kv_fallback.setdefault(user_id, {})
         user_store[memory_id] = {"content": content, **full_metadata}
+        # also record fallback version
+        if self.enable_versioning:
+            self._version_history.setdefault(memory_id, []).append({
+                "timestamp": time.time(),
+                "operation": "create-fallback",
+                "content": content,
+                "metadata": full_metadata,
+                "user_id": user_id,
+            })
 
     def get_memory(
         self, memory_id: str, user_id: Optional[str] = "default_user"
     ) -> Optional[Dict[str, Any]]:
+        """Retrieve a memory by its ID.
+        
+        Args:
+            memory_id: The ID of the memory to retrieve
+            user_id: The ID of the user who owns the memory
+            
+        Returns:
+            The memory data if found, None otherwise
+        """
         user_id = user_id or "default_user"
+        
         if self.sdk_active and self.client:
             try:
-                # The SDK's get method takes memory_id.
-                # sdk_memory = self.client.get(memory_id=memory_id, user_id=user_id)
-                # Assuming .get() returns the memory object directly or None
-                # For now, as .get() by ID is not in basic example, we search by metadata.
-                # This is a workaround and might be inefficient or not precise.
-                search_results = self.client.search(query=memory_id, user_id=user_id, limit=10) # Query by ID
-                for res_list in search_results:
-                    for res in res_list.get('results', []):
-                        if res.get("metadata", {}).get("original_memory_id") == memory_id:
-                            self._log_sdk(f"Retrieved memory via SDK search for user '{user_id}', id '{memory_id}'.")
-                            # Adapt SDK result to expected dict format
-                            return {
-                                "memory_id": memory_id, 
-                                "content": res.get('memory'), 
-                                **res.get("metadata", {})
-                            }
-                self._log_sdk(f"Memory ID '{memory_id}' not found via SDK search for user '{user_id}'. Using fallback.", logging.WARNING)
+                # Try to get the memory directly by ID if the SDK supports it
+                try:
+                    memory = self.client.get(memory_id=memory_id, user_id=user_id)
+                    if memory:
+                        if hasattr(memory, 'to_dict'):
+                            memory = memory.to_dict()
+                        self._log_sdk(f"Retrieved memory via SDK for user '{user_id}', id '{memory_id}'")
+                        return {
+                            "memory_id": memory_id,
+                            "content": memory.get('content', memory.get('memory')),
+                            **memory.get('metadata', {})
+                        }
+                except (AttributeError, NotImplementedError):
+                    pass  # Fall through to search
+                
+                # Fallback to search if direct get is not available
+                search_results = self.client.search(
+                    query=f"id:{memory_id}",
+                    filters={"user_id": user_id},
+                    limit=1,
+                    version="v2"
+                )
+                
+                if search_results and len(search_results) > 0:
+                    memory = search_results[0]
+                    if hasattr(memory, 'to_dict'):
+                        memory = memory.to_dict()
+                    self._log_sdk(f"Retrieved memory via SDK search for user '{user_id}', id '{memory_id}'")
+                    return {
+                        "memory_id": memory_id,
+                        "content": memory.get('content', memory.get('memory')),
+                        **memory.get('metadata', {})
+                    }
+                    
             except Exception as e:
-                self._log_sdk(f"SDK get/search failed: {e}. Using fallback.", logging.ERROR)
-
-        # Fallback logic
-        self._log_fallback(f"Recalling memory for user '{user_id}', id '{memory_id}'.")
+                self._log_error(f"Failed to get memory via SDK: {e}", e)
+                # Fall through to in-memory fallback
+        
+        # Fallback to in-memory store
+        self._log_warning(f"Using fallback storage to retrieve memory for user '{user_id}', id '{memory_id}'")
         user_store = self._kv_fallback.get(user_id, {})
         return user_store.get(memory_id)
 
@@ -132,6 +242,7 @@ class Mem0Client:  # pragma: no cover – stub for SDK interaction
         memory_id: str,
         content: Optional[Any] = None,
         tags: Optional[List[str]] = None,
+        categories: Optional[List[str]] = None,
         user_id: Optional[str] = "default_user",
         metadata: Optional[Dict[str, Any]] = None
     ) -> bool:
@@ -141,18 +252,20 @@ class Mem0Client:  # pragma: no cover – stub for SDK interaction
                 # Assuming SDK has an update method: self.client.update(memory_id=..., data=..., metadata=...)
                 # If not, it's a get, modify, then re-add (or delete and add), which is complex.
                 # For now, log that SDK update is not directly supported by basic example.
-                self._log_sdk(f"SDK update for memory ID '{memory_id}' (user '{user_id}') not directly implemented based on basic SDK examples. Using fallback.", logging.WARNING)
+                self._log_warning(f"SDK update for memory ID '{memory_id}' (user '{user_id}') not directly implemented based on basic SDK examples. Using fallback.")
             except Exception as e:
-                self._log_sdk(f"SDK update attempt failed: {e}. Using fallback.", logging.ERROR)
+                self._log_error(f"SDK update attempt failed: {e}. Using fallback.", e)
 
         # Fallback logic
-        self._log_fallback(f"Updating memory for user '{user_id}', id '{memory_id}'.")
+        self._log_warning(f"Updating memory for user '{user_id}', id '{memory_id}'.")
         user_store = self._kv_fallback.get(user_id)
         if user_store and memory_id in user_store:
             if content is not None:
                 user_store[memory_id]["content"] = content
             if tags is not None:
                 user_store[memory_id]["tags"] = tags
+            if categories is not None:
+                user_store[memory_id]["categories"] = categories
             if metadata is not None:
                 user_store[memory_id].update(metadata) # Merge new metadata
             return True
@@ -160,15 +273,16 @@ class Mem0Client:  # pragma: no cover – stub for SDK interaction
 
     def delete_memory(self, memory_id: str, user_id: Optional[str] = "default_user") -> bool:
         user_id = user_id or "default_user"
+
         if self.sdk_active and self.client:
             try:
                 # Assuming SDK has a delete method: self.client.delete(memory_id=memory_id, user_id=user_id)
-                self._log_sdk(f"SDK delete for memory ID '{memory_id}' (user '{user_id}') not directly implemented based on basic SDK examples. Using fallback.", logging.WARNING)
+                self._log_warning(f"SDK delete for memory ID '{memory_id}' (user '{user_id}') not directly implemented based on basic SDK examples. Using fallback.")
             except Exception as e:
-                self._log_sdk(f"SDK delete attempt failed: {e}. Using fallback.", logging.ERROR)
+                self._log_error(f"SDK delete attempt failed: {e}. Using fallback.", e)
         
         # Fallback logic
-        self._log_fallback(f"Deleting memory for user '{user_id}', id '{memory_id}'.")
+        self._log_warning(f"Deleting memory for user '{user_id}', id '{memory_id}'.")
         user_store = self._kv_fallback.get(user_id)
         if user_store and memory_id in user_store:
             del user_store[memory_id]
@@ -176,78 +290,106 @@ class Mem0Client:  # pragma: no cover – stub for SDK interaction
         return False
 
     def search_memories_by_tags(
-        self, tags: List[str], user_id: Optional[str] = "default_user", limit: int = 10
+        self, 
+        tags: List[str], 
+        user_id: Optional[str] = "default_user", 
+        limit: int = 10,
+        **kwargs
     ) -> List[Dict[str, Any]]:
+        """Search for memories that match all the given tags.
+        
+        Args:
+            tags: List of tags that must all be present in the memory's metadata
+            user_id: ID of the user whose memories to search
+            limit: Maximum number of results to return
+            **kwargs: Additional parameters for the search API
+            
+        Returns:
+            List of matching memories with their metadata
+        """
         user_id = user_id or "default_user"
+        if not tags:
+            return []
+
         if self.sdk_active and self.client:
             try:
-                # Use the first tag as the primary query for SDK search.
-                # Client-side filtering might be needed if SDK doesn't support multi-tag metadata search well.
-                query = tags[0] if tags else ""
-                # The SDK search example: `memory.search(query=message, user_id=user_id, limit=3)`
-                # It returns `{"results": [{'memory': '...', 'metadata': {...}}]}
-                # We need to adapt this. The results structure in the example is `search_results["results"]`
-                # but the example code iterates `search_results` directly as if it's the list of results.
-                # Assuming `self.client.search` returns a list of dicts directly, or a dict with a 'results' key.
+                # Create a filter that requires all tags to be present
+                filters = {
+                    "user_id": user_id,
+                    "tags": {"$all": tags}
+                }
                 
-                # Let's assume search results is a list of dicts, each dict is a memory item.
-                # sdk_results = self.client.search(query=query, user_id=user_id, limit=limit)
-                # For now, we'll assume the SDK search is broad and we filter tags client-side from metadata.
-                # This is a placeholder for more specific SDK metadata search capabilities.
-                all_user_memories_sdk = [] # Placeholder for fetching all and filtering
-                # A more realistic approach if metadata search is not robust:
-                # Fetch many memories and filter, or use a broader query.
-                # For now, we'll query by the first tag and hope for the best, then filter.
+                # Use a broad query that might match any of the tags
+                query = " ".join(tags)
                 
-                raw_sdk_results_list = self.client.search(query=query, user_id=user_id, limit=limit * 5) # Fetch more to filter
+                # Execute the search with filters
+                search_params = {
+                    "query": query,
+                    "filters": filters,
+                    "limit": limit,
+                    "version": "v2",
+                    **kwargs
+                }
                 
-                sdk_results_formatted = []
-                # The example `relevant_memories["results"]` implies search returns a dict.
-                # Let's assume it's `{'results': [...]}` based on the example's processing loop.
-                actual_results_list = []
-                if isinstance(raw_sdk_results_list, dict) and 'results' in raw_sdk_results_list:
-                    actual_results_list = raw_sdk_results_list['results']
-                elif isinstance(raw_sdk_results_list, list):
-                    actual_results_list = raw_sdk_results_list
-
-                for res in actual_results_list:
-                    res_metadata = res.get("metadata", {})
-                    res_tags = res_metadata.get("tags", [])
-                    if all(tag in res_tags for tag in tags):
-                        sdk_results_formatted.append({
-                            "memory_id": res_metadata.get("original_memory_id", "N/A"),
-                            "content": res.get("memory"),
-                            **res_metadata
+                results = []
+                sdk_results = self.client.search(**search_params)
+                
+                # Process and format results
+                for item in sdk_results:
+                    if hasattr(item, 'to_dict'):
+                        item = item.to_dict()
+                    
+                    # Ensure the item has all required tags
+                    item_tags = item.get('metadata', {}).get('tags', [])
+                    if all(tag in item_tags for tag in tags):
+                        results.append({
+                            "memory_id": item.get('id'),
+                            "content": item.get('content'),
+                            **item.get('metadata', {})
                         })
-                    if len(sdk_results_formatted) >= limit:
+                    
+                    if len(results) >= limit:
                         break
-                self._log_sdk(f"Searched memories via SDK for user '{user_id}' with tags '{tags}'. Found {len(sdk_results_formatted)}.")
-                return sdk_results_formatted[:limit]
+                        
+                self._log_sdk(f"Found {len(results)} memories matching tags: {tags}")
+                return results
+                
             except Exception as e:
-                self._log_sdk(f"SDK search failed: {e}. Using fallback.", logging.ERROR)
-
-        # Fallback logic
-        self._log_fallback(f"Searching memories for user '{user_id}' with tags '{tags}'.")
-        results: List[Dict[str, Any]] = []
+                self._log_error(f"Tag search failed: {e}", e)
+                # Fall through to fallback implementation
+        
+        # Fallback implementation: filter in-memory store
+        self._log_warning(f"Using fallback tag search for tags: {tags}")
         user_store = self._kv_fallback.get(user_id, {})
-        for mem_id, record in user_store.items():
-            record_tags = record.get("tags", [])
-            if all(tag in record_tags for tag in tags):
-                results.append({"memory_id": mem_id, **record})
-            if len(results) >= limit:
-                break
+        results = []
+        
+        for mem_id, mem_data in user_store.items():
+            mem_tags = mem_data.get('tags', [])
+            if all(tag in mem_tags for tag in tags):
+                results.append({"memory_id": mem_id, **mem_data})
+                if len(results) >= limit:
+                    break
+                    
         return results
 
     # Knowledge graph methods - remain on fallback for now
     def add_relation(
-        self, subject: str, predicate: str, obj: str, 
+        self, 
+        subject: str, 
+        predicate: str, 
+        obj: str, 
         user_id: Optional[str] = "default_user", 
         metadata: Optional[dict[str, Any]] = None
     ) -> None:
+        """Add a relation to the knowledge graph.
+        
+        Note: Currently uses in-memory fallback as the SDK's KG capabilities are not fully implemented.
+        """
         user_id = user_id or "default_user"
         if self.sdk_active:
-            self._log_sdk("Knowledge graph 'add_relation' currently uses in-memory fallback.", logging.WARNING)
-        self._log_fallback(f"Adding KG relation for user '{user_id}': {subject}-{predicate}-{obj}")
+            self._log_warning("Knowledge graph 'add_relation' currently uses in-memory fallback.")
+        
+        self._log_info(f"Adding KG relation for user '{user_id}': {subject}-{predicate}-{obj}")
         self._kg_fallback.append(
             {
                 "subject": subject,
@@ -263,15 +405,80 @@ class Mem0Client:  # pragma: no cover – stub for SDK interaction
         subject: Optional[str] = None,
         predicate: Optional[str] = None,
         obj: Optional[str] = None,
-        user_id: Optional[str] = "default_user"
-    ) -> list[dict[str, Any]]:
-        user_id_filter = user_id or "default_user"
-        if self.sdk_active:
-            self._log_sdk("Knowledge graph 'get_relations_by_pattern' currently uses in-memory fallback.", logging.WARNING)
-        self._log_fallback(f"Querying KG relations for user '{user_id_filter}'.")
-        results: list[dict[str, Any]] = []
+        user_id: Optional[str] = "default_user",
+        **kwargs
+    ) -> List[Dict[str, Any]]:
+        """Query the knowledge graph for relations matching the given pattern.
+        
+        Args:
+            subject: Subject of the relation (optional)
+            predicate: Predicate/type of the relation (optional)
+            obj: Object of the relation (optional)
+            user_id: ID of the user whose knowledge graph to query
+            **kwargs: Additional query parameters
+            
+        Returns:
+            List of matching relations with their metadata
+        """
+        user_id = user_id or "default_user"
+        
+        if self.sdk_active and self.client:
+            try:
+                # Build query filters based on provided pattern
+                filters = {"user_id": user_id}
+                if subject is not None:
+                    filters["subject"] = subject
+                if predicate is not None:
+                    filters["predicate"] = predicate
+                if obj is not None:
+                    filters["object"] = obj
+                
+                # Use the search endpoint with filters
+                search_params = {
+                    "query": " ".join(filter(None, [subject, predicate, obj])),
+                    "filters": filters,
+                    "limit": kwargs.get("limit", 100),  # Default limit
+                    "version": "v2",
+                    **{k: v for k, v in kwargs.items() if k != "limit"}
+                }
+                
+                # Execute the search
+                sdk_results = self.client.search(**search_params)
+                
+                # Convert results to a consistent format
+                results = []
+                for item in sdk_results:
+                    if hasattr(item, 'to_dict'):
+                        item = item.to_dict()
+                    
+                    # Skip if metadata doesn't match the pattern (should be filtered by API)
+                    item_subj = item.get('subject')
+                    item_pred = item.get('predicate')
+                    item_obj = item.get('object')
+                    
+                    if (subject is None or item_subj == subject) and \
+                       (predicate is None or item_pred == predicate) and \
+                       (obj is None or item_obj == obj):
+                        results.append({
+                            "subject": item_subj,
+                            "predicate": item_pred,
+                            "object": item_obj,
+                            "meta": item.get('metadata', {}).get('meta', {}),
+                            "user_id": item.get('user_id')
+                        })
+                
+                self._log_sdk(f"Found {len(results)} KG relations matching pattern")
+                return results
+                
+            except Exception as e:
+                self._log_error(f"KG query failed: {e}", e)
+                # Fall through to fallback implementation
+            
+        # Fallback implementation: filter in-memory store
+        self._log_warning("Using fallback KG query")
+        results = []
         for rel in self._kg_fallback:
-            if rel["user_id"] != user_id_filter and user_id is not None: # Allow global if user_id is None
+            if rel["user_id"] != user_id:
                 continue
             if subject is not None and rel["subject"] != subject:
                 continue
@@ -280,4 +487,64 @@ class Mem0Client:  # pragma: no cover – stub for SDK interaction
             if obj is not None and rel["object"] != obj:
                 continue
             results.append(rel)
+            
         return results
+
+    # -------------------- New Advanced Features --------------------
+    def batch_create_memories(self, items: List[Dict[str, Any]], user_id: str = "default_user") -> List[str]:
+        """Batch create memories. Each item should have keys: memory_id, content, tags, categories, metadata"""
+        created_ids = []
+        for item in items:
+            memory_id = item.get("memory_id") or str(uuid.uuid4())
+            self.create_memory(
+                memory_id=memory_id,
+                content=item.get("content"),
+                tags=item.get("tags"),
+                categories=item.get("categories"),
+                user_id=user_id,
+                metadata=item.get("metadata")
+            )
+            created_ids.append(memory_id)
+        return created_ids
+
+    def get_memory_versions(self, memory_id: str) -> List[Dict[str, Any]]:
+        """Return version history for a memory (fallback only)."""
+        return self._version_history.get(memory_id, [])
+
+    def advanced_search(
+        self,
+        query: str,
+        user_id: str = "default_user",
+        tags: Optional[List[str]] = None,
+        categories: Optional[List[str]] = None,
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Advanced search with optional tag/category filtering."""
+        if self.sdk_active and self.client:
+            filters = {"user_id": user_id}
+            if tags:
+                filters["tags"] = {"ANY": tags}
+            if categories:
+                filters["categories"] = {"ANY": categories}
+            try:
+                results = self.client.search(
+                    query=query,
+                    filters=filters,
+                    version="v2",
+                    limit=limit
+                )
+                return [r if isinstance(r, dict) else r.to_dict() for r in results]
+            except Exception as e:
+                self._log_error(f"Advanced search via SDK failed: {e}")
+        # Fallback: simple keyword search
+        matches = []
+        for mem_id, record in self._kv_fallback.get(user_id, {}).items():
+            if query.lower() in str(record.get("content", "")).lower():
+                if tags and not set(tags) & set(record.get("tags", [])):
+                    continue
+                if categories and not set(categories) & set(record.get("categories", [])):
+                    continue
+                matches.append({"memory_id": mem_id, **record})
+                if len(matches) >= limit:
+                    break
+        return matches

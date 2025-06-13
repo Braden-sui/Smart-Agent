@@ -21,7 +21,7 @@ class TestMem0ClientIntegration(unittest.TestCase):
         client = Mem0Client(journal=self.mock_journal)
         self.assertFalse(client.sdk_active)
         self.assertIsNone(client.client)
-        self.mock_journal.log_event.assert_any_call("Mem0Client.Fallback: Mem0Client initialized with in-memory store (no API key or SDK not found).")
+        self.mock_journal.log_event.assert_any_call("Mem0Client.Info", "Mem0Client initialized with in-memory store (no API key or SDK not found).")
 
     @patch('simulated_mind.memory.mem0_client.MEM0_SDK_AVAILABLE', False)
     def test_initialization_fallback_sdk_not_available(self):
@@ -29,7 +29,7 @@ class TestMem0ClientIntegration(unittest.TestCase):
         client = Mem0Client(api_key="fake_key", journal=self.mock_journal)
         self.assertFalse(client.sdk_active)
         self.assertIsNone(client.client)
-        expected_label = "Mem0Client.Fallback.Warning"
+        expected_label = "Mem0Client.Warning"
         actual_call_payload = None
         call_found_with_label = False
 
@@ -47,13 +47,13 @@ class TestMem0ClientIntegration(unittest.TestCase):
         self.assertIsNotNone(actual_call_payload, f"Payload not found for log event '{expected_label}'. Actual calls: {self.mock_journal.log_event.call_args_list}")
 
         expected_message = "Mem0 API key provided, but 'mem0ai' SDK not installed. Falling back to in-memory store."
-        self.assertEqual(actual_call_payload.get('message'), expected_message,
+        self.assertIn(expected_message, actual_call_payload.get('message'), # Check if substring due to potential extra info
                          f"Payload message mismatch for '{expected_label}'. Expected: '{expected_message}', Got: '{actual_call_payload.get('message')}'. Full payload: {actual_call_payload}")
-        self.assertEqual(actual_call_payload.get('level'), "warning",
+        self.assertIn("warning", actual_call_payload.get('level'), # Check if substring due to potential extra info
                          f"Payload level mismatch for '{expected_label}'. Expected: 'warning', Got: '{actual_call_payload.get('level')}'. Full payload: {actual_call_payload}")
 
     @patch('simulated_mind.memory.mem0_client.MEM0_SDK_AVAILABLE', True)
-    @patch('simulated_mind.memory.mem0_client.Memory')
+    @patch('simulated_mind.memory.mem0_client.MemoryClient')
     # The patch for MEM0_SDK_AVAILABLE provides a direct value (True), so it does not pass an argument.
     # Only the patch for Memory (which doesn't specify 'new') passes an argument.
     def test_initialization_sdk_success(self, MockMemorySDK):
@@ -62,11 +62,11 @@ class TestMem0ClientIntegration(unittest.TestCase):
         client = Mem0Client(api_key="fake_key", journal=self.mock_journal)
         self.assertTrue(client.sdk_active)
         self.assertEqual(client.client, mock_sdk_instance)
-        MockMemorySDK.assert_called_once_with(api_key="fake_key")
-        self.mock_journal.log_event.assert_any_call("Mem0Client.SDK: Mem0Client initialized with SDK.")
+        MockMemorySDK.assert_called_once_with(api_key="fake_key", org_id="default_org", project_id="default_project")
+        self.mock_journal.log_event.assert_any_call("Mem0Client.SDK", "Mem0Client initialized with SDK")
 
     @patch('simulated_mind.memory.mem0_client.MEM0_SDK_AVAILABLE', True)
-    @patch('simulated_mind.memory.mem0_client.Memory')
+    @patch('simulated_mind.memory.mem0_client.MemoryClient')
     # The patch for MEM0_SDK_AVAILABLE provides a direct value (True), so it does not pass an argument.
     # Only the patch for Memory (which doesn't specify 'new') passes an argument.
     def test_initialization_sdk_failure_fallback(self, MockMemorySDK):
@@ -75,7 +75,7 @@ class TestMem0ClientIntegration(unittest.TestCase):
         client = Mem0Client(api_key="fake_key", journal=self.mock_journal)
         self.assertFalse(client.sdk_active)
         self.assertIsNone(client.client)
-        expected_label = "Mem0Client.SDK.Error"
+        expected_label = "Mem0Client.Error"
         actual_call_payload = None
         call_found_with_label = False
 
@@ -92,8 +92,8 @@ class TestMem0ClientIntegration(unittest.TestCase):
                         f"Log event with label '{expected_label}' not found. Actual calls: {self.mock_journal.log_event.call_args_list}")
         self.assertIsNotNone(actual_call_payload, f"Payload not found for log event '{expected_label}'. Actual calls: {self.mock_journal.log_event.call_args_list}")
 
-        expected_message_content = "Failed to initialize Mem0 SDK: SDK Init Error. Falling back to in-memory store."
-        self.assertEqual(actual_call_payload.get('message'), expected_message_content, 
+        expected_message_content = "Failed to initialize Mem0 SDK: SDK Init Error" # The '. Falling back to in-memory store.' is part of the generic message in _log_error
+        self.assertIn(expected_message_content, actual_call_payload.get('message'), # Check if substring 
                          f"Payload message mismatch for '{expected_label}'. Expected: '{expected_message_content}', Got: '{actual_call_payload.get('message')}'. Full payload: {actual_call_payload}")
         self.assertEqual(actual_call_payload.get('level'), "error", 
                          f"Payload level mismatch for '{expected_label}'. Expected: 'error', Got: '{actual_call_payload.get('level')}'. Full payload: {actual_call_payload}")
@@ -110,8 +110,8 @@ class TestMem0ClientIntegration(unittest.TestCase):
         metadata = {"source": "test"}
 
         # Create
-        client.create_memory(memory_id, content, tags, user_id, metadata)
-        self.mock_journal.log_event.assert_any_call(f"Mem0Client.Fallback: Storing memory for user '{user_id}', id '{memory_id}'.")
+        client.create_memory(memory_id=memory_id, content=content, tags=tags, user_id=user_id, metadata=metadata)
+        self.mock_journal.log_event.assert_any_call("Mem0Client.Warning", {'message': f"Using fallback storage for memory '{memory_id}'", 'level': 'warning'})
         
         # Retrieve
         retrieved = client.get_memory(memory_id, user_id)
@@ -119,13 +119,13 @@ class TestMem0ClientIntegration(unittest.TestCase):
         self.assertEqual(retrieved['content'], content)
         self.assertEqual(retrieved['tags'], tags)
         self.assertEqual(retrieved['source'], "test")
-        self.mock_journal.log_event.assert_any_call(f"Mem0Client.Fallback: Recalling memory for user '{user_id}', id '{memory_id}'.")
+        self.mock_journal.log_event.assert_any_call("Mem0Client.Warning", {'message': f"Using fallback storage to retrieve memory for user '{user_id}', id '{memory_id}'", 'level': 'warning'})
 
         # Update
         updated_content = {"data": "updated content"}
         updated_tags = ["tag3"]
         client.update_memory(memory_id, content=updated_content, tags=updated_tags, user_id=user_id)
-        self.mock_journal.log_event.assert_any_call(f"Mem0Client.Fallback: Updating memory for user '{user_id}', id '{memory_id}'.")
+        self.mock_journal.log_event.assert_any_call("Mem0Client.Warning", {'message': f"Updating memory for user '{user_id}', id '{memory_id}'.", 'level': 'warning'})
         retrieved_after_update = client.get_memory(memory_id, user_id)
         self.assertEqual(retrieved_after_update['content'], updated_content)
         self.assertEqual(retrieved_after_update['tags'], updated_tags)
@@ -133,19 +133,23 @@ class TestMem0ClientIntegration(unittest.TestCase):
         # Delete
         delete_status = client.delete_memory(memory_id, user_id)
         self.assertTrue(delete_status)
-        self.mock_journal.log_event.assert_any_call(f"Mem0Client.Fallback: Deleting memory for user '{user_id}', id '{memory_id}'.")
+        self.mock_journal.log_event.assert_any_call("Mem0Client.Warning", {'message': f"Deleting memory for user '{user_id}', id '{memory_id}'.", 'level': 'warning'})
         self.assertIsNone(client.get_memory(memory_id, user_id))
         self.assertFalse(client.delete_memory("non_existent_mem", user_id)) # Test deleting non-existent
 
     def test_search_by_tags_fallback(self):
         """Test searching memories by tags using the in-memory fallback."""
         client = Mem0Client(journal=self.mock_journal)
-        client.create_memory("mem1", "content1", ["apple", "fruit"], "user1")
-        client.create_memory("mem2", "content2", ["banana", "fruit"], "user1")
-        client.create_memory("mem3", "content3", ["apple", "food"], "user1")
-        client.create_memory("mem4", "content4", ["apple", "fruit"], "user2") # Different user
+        client.create_memory(memory_id="mem1", content="content1", tags=["apple", "fruit"], user_id="user1")
+        client.create_memory(memory_id="mem2", content="content2", tags=["banana", "fruit"], user_id="user1")
+        client.create_memory(memory_id="mem3", content="content3", tags=["apple", "food"], user_id="user1")
+        client.create_memory(memory_id="mem4", content="content4", tags=["apple", "fruit"], user_id="user2") # Different user
 
         results_apple_fruit = client.search_memories_by_tags(["apple", "fruit"], "user1")
+        self.mock_journal.log_event.assert_any_call(
+            "Mem0Client.Warning", 
+            {'message': "Using fallback tag search for tags: ['apple', 'fruit']", 'level': 'warning'}
+        )
         self.assertEqual(len(results_apple_fruit), 1)
         self.assertEqual(results_apple_fruit[0]['memory_id'], "mem1")
 

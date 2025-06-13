@@ -35,27 +35,54 @@ task_manager = TaskManager(memory_dao=memory_dao, journal=journal, user_id=USER_
 
 # Initialize Planner with TaskManager and MemoryDAO
 def make_planner():
-    # Local LLM config
-    llm_backend = os.getenv("LLM_BACKEND", "mock")
-    model_name = os.getenv("LLM_MODEL_NAME", "microsoft/DialoGPT-small")
-    model_path = os.getenv("LLM_MODEL_PATH")
+    llm_backend = os.getenv("LLM_BACKEND", "rwkv7-gguf")
+    model_path = os.getenv("RWKV_MODEL_PATH", "./models/rwkv-v7-2.9b-g1-f16.gguf") 
+    context_size = int(os.getenv("LLM_CONTEXT_SIZE", "4096")) # Default to 4096 if not set
+    
+    print(f"--- Initializing Planner --- ")
+    print(f"Attempting to use LLM Backend: {llm_backend}")
+    if llm_backend == "rwkv7-gguf":
+        print(f"RWKV Model Path: {model_path}")
+        print(f"Context Size: {context_size}")
+
     local_llm_client = None
     try:
-        if llm_backend == "transformers":
-            local_llm_client = create_local_llm_client("transformers", model_name=model_name)
-        elif llm_backend == "rwkv":
-            local_llm_client = create_local_llm_client("rwkv", model_path=model_path)
+        # The create_local_llm_client factory will handle specific backend logic including RWKV7GGUF
+        local_llm_client = create_local_llm_client(
+            backend=llm_backend,
+            model_path=model_path,      # Relevant for rwkv7-gguf
+            context_size=context_size,  # Relevant for rwkv7-gguf
+            # model_name=os.getenv("LLM_MODEL_NAME") # Relevant for transformers, pass if needed
+        )
+
+        if local_llm_client and local_llm_client.is_available():
+            print(f" {llm_backend.upper()} client created and model is available.")
         else:
-            local_llm_client = create_local_llm_client("mock")
-        if local_llm_client.is_available():
-            print(f"Local LLM ({llm_backend}) loaded successfully")
-        else:
-            print(f"Local LLM ({llm_backend}) not available, using templates only")
-    except Exception as e:
-        print(f"Failed to load local LLM: {e}")
-        print("Falling back to template-only planning")
+            # If client was created but model isn't available, or if client is None from the start
+            print(f" {llm_backend.upper()} client could not be made available (model missing, config error, or client is None).")
+            print(" Planner will operate without LLM assistance (relying on templates and fallback logic).")
+            # local_llm_client might be an instance that's not available, or None if create_local_llm_client failed early.
+            # If it's an instance, Planner will see is_available() as False. If None, Planner handles it.
+            
+    except ValueError as ve:
+        print(f" Configuration error for LLM backend '{llm_backend}': {ve}.")
+        print(" Planner will operate without LLM assistance.")
         local_llm_client = None
-    return Planner(memory_store=memory_dao, journal=journal, goal_class=Goal, task_manager=task_manager, local_llm_client=local_llm_client)
+    except Exception as e:
+        print(f" Critical error during {llm_backend.upper()} client setup: {type(e).__name__}: {e}.")
+        print(" Planner will operate without LLM assistance.")
+        local_llm_client = None
+    
+    print(f"Planner will use LLM client: {type(local_llm_client).__name__}")
+    print("--- Planner Initialized --- ")
+    
+    return Planner(
+        memory_store=memory_dao, 
+        journal=journal, 
+        goal_class=Goal, 
+        task_manager=task_manager, 
+        local_llm_client=local_llm_client
+    )
 
 
 # Initialize SubAgent (for demo, single agent)

@@ -5,6 +5,9 @@ This makes the top-level ``simulated_mind`` package importable when running
 """
 from __future__ import annotations
 
+# from dotenv import load_dotenv
+# load_dotenv()  # Load environment variables from .env file
+
 import sys
 from pathlib import Path
 
